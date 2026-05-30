@@ -11,29 +11,22 @@ repositories {
 }
 
 dependencies {
-    // Наша библиотека для веб-сокетов
     implementation 'org.java-websocket:Java-WebSocket:1.5.7'
 }
 
 application {
-    mainClass = 'com.renalcraft.messenger.ServerMain'
+    mainClass = 'ServerMain'
 }
 
-// Настройка сборки "жирного" JAR со всеми зависимостями внутри
 jar {
     manifest {
         attributes(
-            'Main-Class': 'com.renalcraft.messenger.ServerMain'
+            'Main-Class': 'ServerMain'
         )
     }
-    // Этот код заставляет Gradle упаковать библиотеку Java-WebSocket внутрь нашего server.jar
     from {
         configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
     }
-
-    // Переименовываем итоговый файл, чтобы Dockerfile всегда видел его как server.jar
     archiveFileName = 'server.jar'
-
-    // Дубликат защиты от конфликтов файлов в jar
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
