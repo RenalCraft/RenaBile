@@ -12,6 +12,8 @@ repositories {
 
 dependencies {
     implementation 'org.java-websocket:Java-WebSocket:1.5.7'
+    // Добавляем библиотеку для работы с JSON-командами
+    implementation 'org.json:json:20240303'
 }
 
 application {
