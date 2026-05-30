@@ -1,0 +1,28 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.java-websocket:Java-WebSocket:1.5.7'
+}
+
+application {
+    mainClass = 'com.renalcraft.messenger.ServerMain'
+}
+
+// Настройка сборки "жирного" (fat) jar-файла, где все зависимости внутри
+jar {
+    archiveFileName = 'server.jar'
+    manifest {
+        attributes 'Main-Class': 'com.renalcraft.messenger.ServerMain'
+    }
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
