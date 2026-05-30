@@ -1,11 +1,22 @@
-# Шаг 1: Собираем проект с помощью Gradle на базе Java 17
+# Шаг 1: Сборка проекта
 FROM gradle:7.6-jdk17 AS build
-COPY --chown=gradle:gradle . /home/gradle/src
-WORKDIR /home/gradle/src
-RUN gradle jar --no-daemon
+WORKDIR /app
 
-# Шаг 2: Запускаем готовый jar на легковесной Java 17
+# Копируем только файлы конфигурации Gradle
+COPY build.gradle settings.gradle* ./
+
+# Копируем исходный код
+COPY src ./src
+
+# Собираем JAR-файл, используя глобальный gradle контейнера, игнорируя локальный gradlew
+RUN gradle jar --no-daemon --stacktrace
+
+# Шаг 2: Запуск приложения
 FROM openjdk:17-jdk-slim
+WORKDIR /app
 EXPOSE 8080
-COPY --from=build /home/gradle/src/build/libs/server.jar /app/server.jar
-ENTRYPOINT ["java", "-jar", "/app/server.jar"]
+
+# Копируем собранный jar-файл из предыдущего шага
+COPY --from=build /app/build/libs/server.jar ./server.jar
+
+ENTRYPOINT ["java", "-jar", "server.jar"]
