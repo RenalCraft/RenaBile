@@ -205,7 +205,7 @@ public class ServerMain extends WebSocketServer {
                 JSONObject m = new JSONObject();
                 m.put("from", cm.from);
                 m.put("to", cm.to);
-                m.put("text", cm.text);
+                m.put("text", cm.message); // Переменная исправлена на cm.message
                 array.put(m);
             }
         }
