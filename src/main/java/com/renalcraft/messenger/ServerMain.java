@@ -16,7 +16,8 @@ public class ServerMain extends WebSocketServer {
     private final Map<WebSocket, String> activeSessions = new ConcurrentHashMap<>();
     private final Map<String, WebSocket> onlineUsers = new ConcurrentHashMap<>();
 
-    private static final String DEFAULT_HOST = "dpg-d8drpdmk1jcs739b1t60-a.frankfurt-postgres.render.com";
+    // Перешли на внутренний хост дата-центра Render для стабильности и скорости
+    private static final String DEFAULT_HOST = "dpg-d8drpdmk1jcs739b1t60-a";
     private static final String DB_NAME = "renabile_db";
     private static final String DB_USER = "renabile_db_user";
     private static final String DB_PASS = "Z6A4Hq5tNq639FAyWbJFaQjeUFQVYa78";
@@ -47,6 +48,7 @@ public class ServerMain extends WebSocketServer {
             }
             jdbcUrl = "jdbc:" + envUrl;
         } else {
+            // Формируем внутренний URL с обязательным указанием порта 5432
             jdbcUrl = "jdbc:postgresql://" + DEFAULT_HOST + ":5432/" + DB_NAME;
         }
 
@@ -55,7 +57,10 @@ public class ServerMain extends WebSocketServer {
         props.setProperty("password", DB_PASS);
         props.setProperty("ssl", "true");
         props.setProperty("sslmode", "require");
+
+        // Эти параметры обходят строгую проверку сертификатов Render Java-драйвером
         props.setProperty("sslfactory", "org.postgresql.ssl.NonValidatingFactory");
+        props.setProperty("allowEncodingChanges", "true");
         props.setProperty("connectTimeout", "10");
 
         return DriverManager.getConnection(jdbcUrl, props);
@@ -63,7 +68,6 @@ public class ServerMain extends WebSocketServer {
 
     @Override
     public void onOpen(WebSocket conn, ClientHandshake handshake) {
-        // ЛОГ: Кто-то подключился
         String ip = conn.getRemoteSocketAddress().getAddress().getHostAddress();
         System.out.println("[СЕТЬ] Новое подключение! IP: " + ip);
     }
@@ -89,7 +93,7 @@ public class ServerMain extends WebSocketServer {
                 return;
             }
 
-            // Достаем внутренний объект "data"
+            // Достаем внутренний объект "data", который присылает ПК-клиент
             JSONObject data = json.getJSONObject("data");
 
             switch (type) {
@@ -103,7 +107,7 @@ public class ServerMain extends WebSocketServer {
                     break;
             }
         } catch (Exception e) {
-            System.err.println("[ОШИБКА ОБРАБОТКИ] " + e.getMessage());
+            System.err.println("[ОШИБКА ОБРАБОТКИ СООБЩЕНИЯ] " + e.getMessage());
             e.printStackTrace();
         }
     }
@@ -132,15 +136,15 @@ public class ServerMain extends WebSocketServer {
             insert.setString(1, user); insert.setString(2, pass); insert.setString(3, code);
             insert.executeUpdate();
 
-            // ЛОГ: Успешная регистрация
-            System.out.println("[БАЗА] Зарегистрирован новый юзер: " + user + " | Код: " + code + " | IP: " + ip);
+            // Четкий лог успешной регистрации в консоль сервера
+            System.out.println("[БАЗА] Зарегистрирован новый юзер: " + user + " | Назначен код: " + code + " | IP: " + ip);
 
             JSONObject respData = new JSONObject();
             respData.put("code", code);
             sendResponse(conn, "REG_OK", respData);
         } catch (Exception e) {
             System.err.println("[ОШИБКА REG] " + e.getMessage());
-            sendResponse(conn, "ERROR", e.getMessage());
+            sendResponse(conn, "ERROR", "Ошибка регистрации на сервере: " + e.getMessage());
         }
     }
 
@@ -163,8 +167,8 @@ public class ServerMain extends WebSocketServer {
             activeSessions.put(conn, user);
             onlineUsers.put(user, conn);
 
-            // ЛОГ: Успешный вход
-            System.out.println("[БАЗА] Юзер вошел в систему: " + user + " | Код: " + code + " | IP: " + ip);
+            // Четкий лог успешного входа в консоль сервера
+            System.out.println("[БАЗА] Юзер успешно авторизован: " + user + " | Код: " + code + " | IP: " + ip);
 
             JSONObject respData = new JSONObject();
             respData.put("code", code);
@@ -174,7 +178,7 @@ public class ServerMain extends WebSocketServer {
             broadcastFriendListUpdate(user);
         } catch (Exception e) {
             System.err.println("[ОШИБКА AUTH] " + e.getMessage());
-            sendResponse(conn, "ERROR", e.getMessage());
+            sendResponse(conn, "ERROR", "Ошибка авторизации на сервере: " + e.getMessage());
         }
     }
 
@@ -282,6 +286,7 @@ public class ServerMain extends WebSocketServer {
     }
 
     @Override public void onError(WebSocket conn, Exception ex) {}
+
     @Override
     public void onStart() {
         System.out.println("Java Core WebSocket Server онлайн. Ожидание подключений...");
