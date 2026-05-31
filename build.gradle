@@ -11,24 +11,47 @@ repositories {
 }
 
 dependencies {
-    implementation 'org.java-websocket:Java-WebSocket:1.5.7'
-    // Добавляем библиотеку для работы с JSON-командами
-    implementation 'org.json:json:20240303'
+    // Веб-сокеты для связи между клиентом и сервером
+    implementation 'org.java-websocket:Java-WebSocket:1.5.3'
+
+    // Библиотека для работы с JSON пакетами
+    implementation 'org.json:json:20231013'
+
+    // ДРАЙВЕР ДЛЯ POSTGRESQL (теперь база не сотрется!)
+    implementation 'org.postgresql:postgresql:42.7.2'
+
+    // Логирование (нужно для работы некоторых внутренних компонентов)
+    implementation 'org.slf4j:slf4j-simple:2.0.9'
+}
+
+testing {
+    suites {
+        test {
+            useJUnitJupiter('5.9.1')
+        }
+    }
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
 }
 
 application {
-    mainClass = 'ServerMain'
+    // Главный класс твоего сервера
+    mainClass = 'com.renalcraft.messenger.server.ServerMain'
 }
 
+// Таска для сборки жирного JAR-ника, если деплоишь вручную
 jar {
     manifest {
         attributes(
-            'Main-Class': 'ServerMain'
+                'Main-Class': 'com.renalcraft.messenger.server.ServerMain'
         )
     }
     from {
         configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
     }
-    archiveFileName = 'server.jar'
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
