@@ -16,7 +16,6 @@ public class ServerMain extends WebSocketServer {
     private final Map<WebSocket, String> activeSessions = new ConcurrentHashMap<>();
     private final Map<String, WebSocket> onlineUsers = new ConcurrentHashMap<>();
 
-    // Жесткая запаска на случай, если системная переменная вдруг пропадет
     private static final String DEFAULT_HOST = "dpg-d8drpdmk1jcs739b1t60-a";
     private static final String DB_NAME = "renabile_db";
     private static final String DB_USER = "renabile_db_user";
@@ -91,9 +90,7 @@ public class ServerMain extends WebSocketServer {
 
     @Override
     public void onMessage(WebSocket conn, String message) {
-        // Очищаем от переносов строк \n, которые шлет Андроид для проталкивания буфера
         String cleanMessage = message.trim();
-        System.out.println("[СЕТЬ] Получено сообщение: " + cleanMessage);
 
         try {
             JSONObject json = new JSONObject(cleanMessage);
@@ -104,20 +101,28 @@ public class ServerMain extends WebSocketServer {
                 return;
             }
 
-            // Унифицируем типы пакетов (и для ПК, и для Андроида)
+            // ЖЕЛЕЗНАЯ ПОДСТРАХОВКА ТИПОВ ДАННЫХ
             String type = rawType;
-            if ("LOGIN".equals(rawType)) type = "AUTH";
-            if ("REGISTER".equals(rawType)) type = "REG";
+            if ("LOGIN".equals(rawType) || "LOGI".equals(rawType)) type = "AUTH";
+            if ("REGISTER".equals(rawType) || "REGI".equals(rawType)) type = "REG";
             if ("MESSAGE".equals(rawType)) type = "MSG";
 
-            // КРОСС-ПЛАТФОРМЕННЫЙ ХАК: Вытаскиваем "data"
             JSONObject data;
             if (json.has("data")) {
                 data = json.getJSONObject("data");
             } else {
-                // Если пришел плоский JSON, используем сам корень
                 data = json;
             }
+
+            // БЕЗОПАСНЫЙ ВЫВОД В КОНСОЛЬ RENDER (Звёздочки вместо паролей)
+            JSONObject safeLog = new JSONObject(cleanMessage);
+            if (safeLog.has("data")) {
+                JSONObject safeData = safeLog.getJSONObject("data");
+                if (safeData.has("password")) safeData.put("password", "********");
+            } else if (safeLog.has("password")) {
+                safeLog.put("password", "********");
+            }
+            System.out.println("[СЕТЬ] Получен пакет: " + safeLog.toString());
 
             switch (type) {
                 case "REG":
@@ -141,7 +146,7 @@ public class ServerMain extends WebSocketServer {
                     break;
             }
         } catch (Exception e) {
-            System.err.println("[ОШИБКА ОБРАБОТКИ СООБЩЕНИЯ] " + e.getMessage());
+            System.err.println("[ОШИБКА ОБРАБОТКИ СООБЩЕНИЯ]");
             e.printStackTrace();
         }
     }
@@ -170,12 +175,11 @@ public class ServerMain extends WebSocketServer {
             insert.setString(1, user); insert.setString(2, pass); insert.setString(3, code);
             insert.executeUpdate();
 
-            System.out.println("[БАЗА] Зарегистрирован новый юзер: " + user + " | Код: " + code + " | IP: " + ip);
+            System.out.println("[БАЗА] Зарегистрирован новый юзер: " + user + " | Код: " + code);
 
             JSONObject respData = new JSONObject();
             respData.put("code", code);
 
-            // Отправляем ответ, дублируя REG_OK и auth_success для совместимости
             sendResponse(conn, "REG_OK", respData);
             sendResponse(conn, "auth_success", respData);
         } catch (Exception e) {
@@ -187,7 +191,6 @@ public class ServerMain extends WebSocketServer {
     private void handleAuth(WebSocket conn, JSONObject data) {
         String user = data.getString("username").trim();
         String pass = data.getString("password").trim();
-        String ip = conn.getRemoteSocketAddress().getAddress().getHostAddress();
 
         try (Connection db = getFreshConnection()) {
             PreparedStatement query = db.prepareStatement("SELECT user_code FROM users WHERE username = ? AND password = ?");
@@ -195,7 +198,6 @@ public class ServerMain extends WebSocketServer {
             ResultSet rs = query.executeQuery();
 
             if (!rs.next()) {
-                // Дублируем ошибку для обоих типов клиентов
                 sendResponse(conn, "ERROR", "Неверный логин или пароль!");
                 sendResponse(conn, "auth_fail", new JSONObject().put("message", "Неверный логин или пароль!"));
                 return;
@@ -205,12 +207,11 @@ public class ServerMain extends WebSocketServer {
             activeSessions.put(conn, user);
             onlineUsers.put(user, conn);
 
-            System.out.println("[БАЗА] Юзер успешно авторизован: " + user + " | Код: " + code + " | IP: " + ip);
+            System.out.println("[БАЗА] Успешный вход: " + user + " | Код: " + code);
 
             JSONObject respData = new JSONObject();
             respData.put("code", code);
 
-            // Отправляем успешный статус обоим видам клиентов (ПК и Андроид)
             sendResponse(conn, "AUTH_OK", respData);
             sendResponse(conn, "auth_success", respData);
 
@@ -226,7 +227,6 @@ public class ServerMain extends WebSocketServer {
         String me = activeSessions.get(conn);
         if (me == null) return;
 
-        // Поддержка поиска как по коду (0101), так и по имени ("friend")
         String target = data.has("code") ? data.getString("code").trim() : data.optString("friend", "").trim();
 
         try (Connection db = getFreshConnection()) {
@@ -257,7 +257,6 @@ public class ServerMain extends WebSocketServer {
         String me = activeSessions.get(conn);
         if (me == null) return;
 
-        // Корректируем поля для совместимости
         String toTarget = data.has("to") ? data.getString("to") : data.optString("chat", "GLOBAL");
         String text = data.has("text") ? data.getString("text") : data.optString("message", "");
         String senderCode = data.optString("fromCode", "GLOBAL");
@@ -266,15 +265,13 @@ public class ServerMain extends WebSocketServer {
         msgData.put("from", toTarget.equals("GLOBAL") || toTarget.equals("Общий чат") ? "GLOBAL" : senderCode);
         msgData.put("senderName", me);
         msgData.put("text", text);
-
-        // Поля под Андроид клиент
         msgData.put("message", text);
 
         if (toTarget.equals("GLOBAL") || toTarget.equals("Общий чат")) {
             for (Map.Entry<WebSocket, String> session : activeSessions.entrySet()) {
                 if (session.getKey() != conn && session.getKey().isOpen()) {
                     sendResponse(session.getKey(), "MSG", msgData);
-                    sendResponse(session.getKey(), "message", msgData); // Для Андроида
+                    sendResponse(session.getKey(), "message", msgData);
                 }
             }
         } else {
@@ -286,7 +283,7 @@ public class ServerMain extends WebSocketServer {
                     WebSocket targetConn = onlineUsers.get(rs.getString("username"));
                     if (targetConn != null && targetConn.isOpen()) {
                         sendResponse(targetConn, "MSG", msgData);
-                        sendResponse(targetConn, "message", msgData); // Для Андроида
+                        sendResponse(targetConn, "message", msgData);
                     }
                 }
             } catch (Exception e) { e.printStackTrace(); }
@@ -312,8 +309,6 @@ public class ServerMain extends WebSocketServer {
                 array.put(fJson);
             }
             sendResponse(conn, "FRIENDS_LIST", new JSONObject().put("list", array));
-
-            // Совместимость со списком комнат/чатов для Андроида
             sendResponse(conn, "update_chats", new JSONObject().put("chats", array));
         } catch (Exception e) { e.printStackTrace(); }
     }
