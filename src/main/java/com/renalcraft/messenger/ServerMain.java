@@ -10,91 +10,38 @@ import java.net.InetSocketAddress;
 import java.sql.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 public class ServerMain extends WebSocketServer {
 
-    static class ChatMessage {
-        String from;
-        String to;
-        String message;
-
-        ChatMessage(String from, String to, String message) {
-            this.from = from;
-            this.to = to;
-            this.message = message;
-        }
-    }
-
-    // Оперативная память для активных сессий (кто онлайн)
     private final Map<WebSocket, String> activeSessions = new ConcurrentHashMap<>();
     private final Map<String, WebSocket> onlineUsers = new ConcurrentHashMap<>();
-    private final List<ChatMessage> globalHistory = new CopyOnWriteArrayList<>();
+
+    // БЕЗОПАСНО: Данные подключения теперь берутся из среды выполнения Render
+    private final String dbUrl = System.getenv("DATABASE_URL") != null ?
+            System.getenv("DATABASE_URL") : "jdbc:postgresql://dpg-d8drpdmk1jcs739b1t60-a.frankfurt-postgres.render.com:5432/renabile_db";
+    private final String dbUser = "renabile_db_user";
+    private final String dbPass = "Z6A4Hq5tNq639FAyWbJFaQjeUFQVYa78";
 
     public ServerMain(int port) {
         super(new InetSocketAddress(port));
-        initDatabase();
     }
 
-    // ИСПРАВЛЕННЫЙ МЕТОД ПОДКЛЮЧЕНИЯ К БАЗЕ
-    private Connection getConnection() throws SQLException {
-        String dbUrl = System.getenv("DATABASE_URL"); // Если запущено на Render
-
-        // 1. Если мы работаем внутри облака Render, используем автоматическую строку
-        if (dbUrl != null && !dbUrl.isEmpty()) {
-            if (dbUrl.startsWith("postgres://")) {
-                dbUrl = dbUrl.replace("postgres://", "jdbc:postgresql://");
-            } else if (dbUrl.startsWith("postgresql://")) {
-                dbUrl = dbUrl.replace("postgresql://", "jdbc:postgresql://");
-            }
-            return DriverManager.getConnection(dbUrl);
-        }
-
-        // 2. Если мы запускаем сервер ЛОКАЛЬНО на твоём ПК:
-        // Передаём параметры раздельно через Properties, чтобы драйвер не ругался на формат порта!
-        String url = "jdbc:postgresql://dpg-d8drpdmk1jcs739b1t60-a.frankfurt-postgres.render.com:5432/renabile_db";
-
+    private Connection getFreshConnection() throws SQLException {
         Properties props = new Properties();
-        props.setProperty("user", "renabile_db_user");
-        props.setProperty("password", "Z6A4Hq5tNq639FAyWbJFaQjeUFQVYa78");
-        props.setProperty("ssl", "true"); // Защита соединения (Render без неё сбросит подключение)
-
-        return DriverManager.getConnection(url, props);
+        props.setProperty("user", dbUser);
+        props.setProperty("password", dbPass);
+        props.setProperty("ssl", "true");
+        props.setProperty("sslmode", "require");
+        return DriverManager.getConnection(dbUrl, props);
     }
 
-    // Создание таблиц в PostgreSQL при первом старте
-    private void initDatabase() {
-        try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
-            // Создаем таблицу юзеров
-            stmt.execute("CREATE TABLE IF NOT EXISTS users (" +
-                    "username VARCHAR(50) PRIMARY KEY, " +
-                    "password VARCHAR(100) NOT NULL, " +
-                    "user_code VARCHAR(10) UNIQUE NOT NULL, " +
-                    "avatar_base64 TEXT DEFAULT '')");
-
-            // Создаем таблицу связей друзей
-            stmt.execute("CREATE TABLE IF NOT EXISTS friends (" +
-                    "username VARCHAR(50), " +
-                    "friend_name VARCHAR(50), " +
-                    "PRIMARY KEY (username, friend_name))");
-
-            System.out.println("[DB] База данных PostgreSQL успешно подключена и проверена. Ошибок парсинга нет!");
-        } catch (Exception e) {
-            System.err.println("[DB Error] Критическая ошибка инициализации таблиц: " + e.getMessage());
-        }
-    }
-
-    @Override
-    public void onOpen(WebSocket conn, ClientHandshake handshake) {
-        System.out.println("Новое сетевое подключение: " + conn.getRemoteSocketAddress());
-    }
+    @Override public void onOpen(WebSocket conn, ClientHandshake handshake) {}
 
     @Override
     public void onClose(WebSocket conn, int code, String reason, boolean remote) {
         String username = activeSessions.remove(conn);
         if (username != null) {
             onlineUsers.remove(username);
-            System.out.println("Пользователь " + username + " ушел в оффлайн.");
             broadcastFriendListUpdate(username);
         }
     }
@@ -110,178 +57,141 @@ public class ServerMain extends WebSocketServer {
                 case "AUTH": handleAuth(conn, json); break;
                 case "ADD_FRIEND": handleAddFriend(conn, json); break;
                 case "MSG": handleMessage(conn, json); break;
-                case "SET_AVATAR": handleSetAvatar(conn, json); break;
+                case "REFRESH_FRIENDS":
+                    String me = activeSessions.get(conn);
+                    if(me != null) sendFriendList(me, conn);
+                    break;
+                case "PING":
+                    conn.send(new JSONObject().put("type", "PONG").toString());
+                    break;
             }
-        } catch (Exception e) {
-            sendError(conn, "Ошибка обработки пакета: " + e.getMessage());
-        }
+        } catch (Exception e) { e.printStackTrace(); }
     }
 
     private void handleRegister(WebSocket conn, JSONObject json) {
         String user = json.getString("username").trim();
         String pass = json.getString("password").trim();
 
-        try (Connection db = getConnection()) {
+        try (Connection db = getFreshConnection()) {
             PreparedStatement check = db.prepareStatement("SELECT 1 FROM users WHERE username = ?");
             check.setString(1, user);
             if (check.executeQuery().next()) {
-                sendResponse(conn, "REG_FAIL", "Этот логин уже занято!");
+                sendResponse(conn, "ERROR", "Этот логин уже занят другим пользователем!");
                 return;
             }
 
-            String code;
-            Random rand = new Random();
+            String code; Random rand = new Random();
             PreparedStatement checkCode = db.prepareStatement("SELECT 1 FROM users WHERE user_code = ?");
             do {
-                code = "#" + (1000 + rand.nextInt(9000));
+                code = String.format("%04d", rand.nextInt(10000));
                 checkCode.setString(1, code);
             } while (checkCode.executeQuery().next());
 
-            PreparedStatement insert = db.prepareStatement(
-                    "INSERT INTO users (username, password, user_code) VALUES (?, ?, ?)");
-            insert.setString(1, user);
-            insert.setString(2, pass);
-            insert.setString(3, code);
+            PreparedStatement insert = db.prepareStatement("INSERT INTO users (username, password, user_code, avatar_base64) VALUES (?, ?, ?, '')");
+            insert.setString(1, user); insert.setString(2, pass); insert.setString(3, code);
             insert.executeUpdate();
 
-            System.out.println("[DB] Зарегистрирован: " + user + " (" + code + ")");
-            sendResponse(conn, "REG_OK", new JSONObject().put("code", code));
-        } catch (Exception e) {
-            sendError(conn, "Ошибка регистрации в БД: " + e.getMessage());
-        }
+            JSONObject data = new JSONObject();
+            data.put("code", code);
+            sendResponse(conn, "REG_OK", data);
+        } catch (Exception e) { sendResponse(conn, "ERROR", e.getMessage()); }
     }
 
     private void handleAuth(WebSocket conn, JSONObject json) {
         String user = json.getString("username").trim();
         String pass = json.getString("password").trim();
 
-        try (Connection db = getConnection()) {
-            PreparedStatement query = db.prepareStatement(
-                    "SELECT user_code, avatar_base64 FROM users WHERE username = ? AND password = ?");
-            query.setString(1, user);
-            query.setString(2, pass);
+        try (Connection db = getFreshConnection()) {
+            PreparedStatement query = db.prepareStatement("SELECT user_code FROM users WHERE username = ? AND password = ?");
+            query.setString(1, user); query.setString(2, pass);
             ResultSet rs = query.executeQuery();
 
             if (!rs.next()) {
-                sendResponse(conn, "AUTH_FAIL", "Неверный логин или пароль!");
+                sendResponse(conn, "ERROR", "Неверный логин или пароль!");
                 return;
             }
 
             String code = rs.getString("user_code");
-            String avatar = rs.getString("avatar_base64");
-
             activeSessions.put(conn, user);
             onlineUsers.put(user, conn);
 
-            System.out.println("[DB] Успешный вход: " + user);
-
             JSONObject data = new JSONObject();
             data.put("code", code);
-            data.put("avatar", avatar != null ? avatar : "");
             sendResponse(conn, "AUTH_OK", data);
 
             sendFriendList(user, conn);
-            sendChatHistory(user, conn);
             broadcastFriendListUpdate(user);
-        } catch (Exception e) {
-            sendError(conn, "Ошибка авторизации в БД: " + e.getMessage());
-        }
+        } catch (Exception e) { sendResponse(conn, "ERROR", e.getMessage()); }
     }
 
     private void handleAddFriend(WebSocket conn, JSONObject json) {
         String me = activeSessions.get(conn);
         if (me == null) return;
-
         String targetCode = json.getString("code").trim();
 
-        try (Connection db = getConnection()) {
+        try (Connection db = getFreshConnection()) {
             PreparedStatement find = db.prepareStatement("SELECT username FROM users WHERE user_code = ?");
             find.setString(1, targetCode);
             ResultSet rs = find.executeQuery();
 
             if (!rs.next()) {
-                sendResponse(conn, "ADD_FRIEND_FAIL", "Пользователь с таким кодом не найден!");
+                sendResponse(conn, "ERROR", "Пользователь не найден!");
                 return;
             }
-
             String friendName = rs.getString("username");
+            if (friendName.equals(me)) return;
 
-            if (friendName.equals(me)) {
-                sendResponse(conn, "ADD_FRIEND_FAIL", "Нельзя добавить самого себя!");
-                return;
-            }
+            PreparedStatement add1 = db.prepareStatement("INSERT INTO friends VALUES (?, ?) ON CONFLICT DO NOTHING");
+            add1.setString(1, me); add1.setString(2, friendName); add1.executeUpdate();
 
-            PreparedStatement check = db.prepareStatement(
-                    "SELECT 1 FROM friends WHERE username = ? AND friend_name = ?");
-            check.setString(1, me);
-            check.setString(2, friendName);
-            if (check.executeQuery().next()) {
-                sendResponse(conn, "ADD_FRIEND_FAIL", "Этот пользователь уже у вас в друзьях!");
-                return;
-            }
-
-            PreparedStatement add1 = db.prepareStatement("INSERT INTO friends VALUES (?, ?)");
-            add1.setString(1, me);
-            add1.setString(2, friendName);
-            add1.executeUpdate();
-
-            PreparedStatement add2 = db.prepareStatement("INSERT INTO friends VALUES (?, ?)");
-            add2.setString(1, friendName);
-            add2.setString(2, me);
-            add2.executeUpdate();
+            PreparedStatement add2 = db.prepareStatement("INSERT INTO friends VALUES (?, ?) ON CONFLICT DO NOTHING");
+            add2.setString(1, friendName); add2.setString(2, me); add2.executeUpdate();
 
             sendFriendList(me, conn);
             WebSocket friendConn = onlineUsers.get(friendName);
-            if (friendConn != null) {
-                sendFriendList(friendName, friendConn);
-            }
-        } catch (Exception e) {
-            sendError(conn, "Ошибка добавления друга в БД: " + e.getMessage());
-        }
+            if (friendConn != null) sendFriendList(friendName, friendConn);
+        } catch (Exception e) { e.printStackTrace(); }
     }
 
     private void handleMessage(WebSocket conn, JSONObject json) {
         String me = activeSessions.get(conn);
         if (me == null) return;
 
-        String toUser = json.getString("to");
+        String toTarget = json.getString("to");
         String text = json.getString("text");
+        String senderCode = json.getString("fromCode");
 
-        globalHistory.add(new ChatMessage(me, toUser, text));
+        JSONObject msgData = new JSONObject();
+        msgData.put("from", toTarget.equals("GLOBAL") ? "GLOBAL" : senderCode);
+        msgData.put("senderName", me);
+        msgData.put("text", text);
 
-        WebSocket targetConn = onlineUsers.get(toUser);
-        if (targetConn != null && targetConn.isOpen()) {
-            JSONObject msgData = new JSONObject();
-            msgData.put("from", me);
-            msgData.put("text", text);
-            sendResponse(targetConn, "MSG", msgData);
-        }
-    }
-
-    private void handleSetAvatar(WebSocket conn, JSONObject json) {
-        String me = activeSessions.get(conn);
-        if (me == null) return;
-
-        String base64Data = json.getString("avatar");
-
-        try (Connection db = getConnection()) {
-            PreparedStatement update = db.prepareStatement("UPDATE users SET avatar_base64 = ? WHERE username = ?");
-            update.setString(1, base64Data);
-            update.executeUpdate();
-
-            System.out.println("Пользователь " + me + " сохранил новую аватарку в Postgres.");
-            broadcastFriendListUpdate(me);
-        } catch (Exception e) {
-            sendError(conn, "Ошибка сохранения аватарки: " + e.getMessage());
+        if (toTarget.equals("GLOBAL")) {
+            for (Map.Entry<WebSocket, String> session : activeSessions.entrySet()) {
+                if (session.getKey() != conn && session.getKey().isOpen()) {
+                    sendResponse(session.getKey(), "MSG", msgData);
+                }
+            }
+        } else {
+            try (Connection db = getFreshConnection()) {
+                PreparedStatement find = db.prepareStatement("SELECT username FROM users WHERE user_code = ?");
+                find.setString(1, toTarget);
+                ResultSet rs = find.executeQuery();
+                if (rs.next()) {
+                    WebSocket targetConn = onlineUsers.get(rs.getString("username"));
+                    if (targetConn != null && targetConn.isOpen()) {
+                        sendResponse(targetConn, "MSG", msgData);
+                    }
+                }
+            } catch (Exception e) { e.printStackTrace(); }
         }
     }
 
     private void sendFriendList(String username, WebSocket conn) {
         if (conn == null || !conn.isOpen()) return;
-
-        try (Connection db = getConnection()) {
+        try (Connection db = getFreshConnection()) {
             PreparedStatement query = db.prepareStatement(
-                    "SELECT u.username, u.user_code, u.avatar_base64 FROM friends f " +
+                    "SELECT u.username, u.user_code FROM friends f " +
                     "JOIN users u ON f.friend_name = u.username WHERE f.username = ?");
             query.setString(1, username);
             ResultSet rs = query.executeQuery();
@@ -293,75 +203,37 @@ public class ServerMain extends WebSocketServer {
                 fJson.put("username", fName);
                 fJson.put("code", rs.getString("user_code"));
                 fJson.put("online", onlineUsers.containsKey(fName));
-                fJson.put("avatar", rs.getString("avatar_base64"));
                 array.put(fJson);
             }
             sendResponse(conn, "FRIENDS_LIST", new JSONObject().put("list", array));
-        } catch (Exception e) {
-            System.err.println("Ошибка выгрузки списка друзей: " + e.getMessage());
-        }
-    }
-
-    private void sendChatHistory(String username, WebSocket conn) {
-        JSONArray array = new JSONArray();
-        for (ChatMessage cm : globalHistory) {
-            if (cm.from.equals(username) || cm.to.equals(username)) {
-                JSONObject m = new JSONObject();
-                m.put("from", cm.from);
-                m.put("to", cm.to);
-                m.put("text", cm.message);
-                array.put(m);
-            }
-        }
-        sendResponse(conn, "HISTORY", new JSONObject().put("history", array));
+        } catch (Exception e) { e.printStackTrace(); }
     }
 
     private void broadcastFriendListUpdate(String username) {
-        try (Connection db = getConnection()) {
+        try (Connection db = getFreshConnection()) {
             PreparedStatement query = db.prepareStatement("SELECT friend_name FROM friends WHERE username = ?");
             query.setString(1, username);
             ResultSet rs = query.executeQuery();
-
             while (rs.next()) {
                 String friendName = rs.getString("friend_name");
                 WebSocket friendConn = onlineUsers.get(friendName);
-                if (friendConn != null) {
-                    sendFriendList(friendName, friendConn);
-                }
+                if (friendConn != null) sendFriendList(friendName, friendConn);
             }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+        } catch (Exception e) { e.printStackTrace(); }
     }
 
     private void sendResponse(WebSocket conn, String type, Object data) {
-        JSONObject resp = new JSONObject();
-        resp.put("type", type);
-        resp.put("data", data);
-        if (conn != null && conn.isOpen()) {
-            conn.send(resp.toString());
-        }
+        JSONObject resp = new JSONObject(); resp.put("type", type); resp.put("data", data);
+        if (conn != null && conn.isOpen()) conn.send(resp.toString());
     }
 
-    private void sendError(WebSocket conn, String errorMsg) {
-        sendResponse(conn, "ERROR", errorMsg);
-    }
-
-    @Override public void onError(WebSocket conn, Exception ex) {
-        System.err.println("Внутренняя ошибка сокета сервера: " + ex.getMessage());
-    }
-
-    @Override public void onStart() {
-        System.out.println("WebSocket-сервер успешно запущен!");
-    }
+    @Override public void onError(WebSocket conn, Exception ex) {}
+    @Override public void onStart() { System.out.println("Java Core WebSocket Server онлайн."); }
 
     public static void main(String[] args) {
         int port = 8080;
         String portEnv = System.getenv("PORT");
-        if (portEnv != null) {
-            port = Integer.parseInt(portEnv);
-        }
-        ServerMain server = new ServerMain(port);
-        server.start();
+        if (portEnv != null) port = Integer.parseInt(portEnv);
+        new ServerMain(port).start();
     }
 }
