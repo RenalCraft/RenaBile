@@ -16,7 +16,7 @@ public class ServerMain extends WebSocketServer {
     private final Map<WebSocket, String> activeSessions = new ConcurrentHashMap<>();
     private final Map<String, WebSocket> onlineUsers = new ConcurrentHashMap<>();
 
-    // Перешли на внутренний хост дата-центра Render для стабильности и скорости
+    // Жесткая запаска на случай, если системная переменная вдруг пропадет
     private static final String DEFAULT_HOST = "dpg-d8drpdmk1jcs739b1t60-a";
     private static final String DB_NAME = "renabile_db";
     private static final String DB_USER = "renabile_db_user";
@@ -33,37 +33,52 @@ public class ServerMain extends WebSocketServer {
             System.err.println("[SERVER-DB] Драйвер PostgreSQL не найден!");
         }
 
-        String jdbcUrl;
+        // Хватаем системную переменную DATABASE_URL прямо со скриншота Render
         String envUrl = System.getenv("DATABASE_URL");
+        String jdbcUrl = null;
+        String user = null;
+        String pass = null;
 
         if (envUrl != null && !envUrl.isEmpty()) {
-            if (envUrl.contains("?")) {
-                envUrl = envUrl.substring(0, envUrl.indexOf("?"));
+            try {
+                // Очищаем префиксы для безопасного парсинга
+                String cleanUrl = envUrl.replace("postgresql://", "").replace("jdbc:postgresql://", "");
+
+                // Делим строку на доступы (user:pass) и хост
+                String[] userInfoAndRest = cleanUrl.split("@");
+                if (userInfoAndRest.length == 2) {
+                    String[] credentials = userInfoAndRest[0].split(":");
+                    user = credentials[0];
+                    pass = credentials[1];
+
+                    String hostAndDb = userInfoAndRest[1];
+                    // Если Render выдал внешний адрес, на лету меняем на стабильный внутренний
+                    if (hostAndDb.contains(".frankfurt-postgres.render.com")) {
+                        hostAndDb = hostAndDb.replace(".frankfurt-postgres.render.com", ":5432");
+                    } else if (!hostAndDb.contains(":5432")) {
+                        // Если порта нет внутри сети, дописываем стандартный 5432
+                        hostAndDb = hostAndDb.replace("/", ":5432/");
+                    }
+                    jdbcUrl = "jdbc:postgresql://" + hostAndDb;
+                }
+            } catch (Exception e) {
+                System.err.println("[SERVER-DB] Ошибка автопарсинга DATABASE_URL, включаем запаску: " + e.getMessage());
             }
-            if (envUrl.startsWith("jdbc:")) {
-                envUrl = envUrl.substring(5);
-            }
-            if (!envUrl.contains(":5432") && envUrl.contains(".com/")) {
-                envUrl = envUrl.replace(".com/", ".com:5432/");
-            }
-            jdbcUrl = "jdbc:" + envUrl;
-        } else {
-            // Формируем внутренний URL с обязательным указанием порта 5432
-            jdbcUrl = "jdbc:postgresql://" + DEFAULT_HOST + ":5432/" + DB_NAME;
         }
 
-        Properties props = new Properties();
-        props.setProperty("user", DB_USER);
-        props.setProperty("password", DB_PASS);
-        props.setProperty("ssl", "true");
-        props.setProperty("sslmode", "require");
+        // Если переменной нет или парсинг зафейлился — сработает дефолтный конфиг
+        if (jdbcUrl == null) {
+            jdbcUrl = "jdbc:postgresql://" + DEFAULT_HOST + ":5432/" + DB_NAME;
+            user = "DB_USER";
+            pass = "DB_PASS";
+        }
 
-        // Эти параметры обходят строгую проверку сертификатов Render Java-драйвером
-        props.setProperty("sslfactory", "org.postgresql.ssl.NonValidatingFactory");
-        props.setProperty("allowEncodingChanges", "true");
-        props.setProperty("connectTimeout", "10");
+        // Принудительно вшиваем SSL параметры, без которых Render блокирует Java-драйвер
+        if (!jdbcUrl.contains("?")) {
+            jdbcUrl += "?ssl=true&sslmode=require&sslfactory=org.postgresql.ssl.NonValidatingFactory&allowEncodingChanges=true&connectTimeout=10";
+        }
 
-        return DriverManager.getConnection(jdbcUrl, props);
+        return DriverManager.getConnection(jdbcUrl, user, pass);
     }
 
     @Override
@@ -93,7 +108,6 @@ public class ServerMain extends WebSocketServer {
                 return;
             }
 
-            // Достаем внутренний объект "data", который присылает ПК-клиент
             JSONObject data = json.getJSONObject("data");
 
             switch (type) {
@@ -136,8 +150,7 @@ public class ServerMain extends WebSocketServer {
             insert.setString(1, user); insert.setString(2, pass); insert.setString(3, code);
             insert.executeUpdate();
 
-            // Четкий лог успешной регистрации в консоль сервера
-            System.out.println("[БАЗА] Зарегистрирован новый юзер: " + user + " | Назначен код: " + code + " | IP: " + ip);
+            System.out.println("[БАЗА] Зарегистрирован новый юзер: " + user + " | Код: " + code + " | IP: " + ip);
 
             JSONObject respData = new JSONObject();
             respData.put("code", code);
@@ -167,7 +180,6 @@ public class ServerMain extends WebSocketServer {
             activeSessions.put(conn, user);
             onlineUsers.put(user, conn);
 
-            // Четкий лог успешного входа в консоль сервера
             System.out.println("[БАЗА] Юзер успешно авторизован: " + user + " | Код: " + code + " | IP: " + ip);
 
             JSONObject respData = new JSONObject();
