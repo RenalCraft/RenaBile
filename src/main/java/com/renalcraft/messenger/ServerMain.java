@@ -50,11 +50,13 @@ public class ServerMain extends WebSocketServer {
         // 3. Собираем итоговый JDBC URL
         finalUrl = "jdbc:" + finalUrl;
 
-        // 4. Добавляем параметры SSL прямо в URL, чтобы обойти ошибку "connection attempt failed"
+        // 4. Добавляем параметры SSL и фабрику, отключающую строгую проверку сертификата Render
         if (!finalUrl.contains("?")) {
-            finalUrl += "?ssl=true&sslmode=require";
+            finalUrl += "?ssl=true&sslmode=require&sslfactory=org.postgresql.ssl.NonValidatingFactory";
         } else if (!finalUrl.contains("ssl=")) {
-            finalUrl += "&ssl=true&sslmode=require";
+            finalUrl += "&ssl=true&sslmode=require&sslfactory=org.postgresql.ssl.NonValidatingFactory";
+        } else if (!finalUrl.contains("sslfactory=")) {
+            finalUrl += "&sslfactory=org.postgresql.ssl.NonValidatingFactory";
         }
 
         // Подключаемся, передавая URL, логин и пароль отдельно
