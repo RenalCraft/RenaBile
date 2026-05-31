@@ -37,30 +37,33 @@ public class ServerMain extends WebSocketServer {
 
         String finalUrl = dbUrl;
 
-        // 1. Убираем "jdbc:", если оно есть в начале, для чистки формата
+        // 1. Очищаем строку от параметров, если они там были, чтобы они не мешали
+        if (finalUrl.contains("?")) {
+            finalUrl = finalUrl.substring(0, finalUrl.indexOf("?"));
+        }
+
+        // 2. Убираем "jdbc:", если оно есть в начале, для чистки формата
         if (finalUrl.startsWith("jdbc:")) {
             finalUrl = finalUrl.substring(5);
         }
 
-        // 2. Добавляем порт 5432, если его нет
+        // 3. Добавляем порт 5432, если его нет
         if (!finalUrl.contains(":5432") && finalUrl.contains(".com/")) {
             finalUrl = finalUrl.replace(".com/", ".com:5432/");
         }
 
-        // 3. Собираем итоговый JDBC URL
+        // 4. Собираем чистый базовый JDBC URL без лишних знаков ? и параметров
         finalUrl = "jdbc:" + finalUrl;
 
-        // 4. Добавляем параметры SSL и фабрику, отключающую строгую проверку сертификата Render
-        if (!finalUrl.contains("?")) {
-            finalUrl += "?ssl=true&sslmode=require&sslfactory=org.postgresql.ssl.NonValidatingFactory";
-        } else if (!finalUrl.contains("ssl=")) {
-            finalUrl += "&ssl=true&sslmode=require&sslfactory=org.postgresql.ssl.NonValidatingFactory";
-        } else if (!finalUrl.contains("sslfactory=")) {
-            finalUrl += "&sslfactory=org.postgresql.ssl.NonValidatingFactory";
-        }
+        // 5. Передаем все настройки SSL жестко через Properties. Облако Render это скушает на 100%
+        Properties props = new Properties();
+        props.setProperty("user", dbUser);
+        props.setProperty("password", dbPass);
+        props.setProperty("ssl", "true");
+        props.setProperty("sslmode", "require");
+        props.setProperty("sslfactory", "org.postgresql.ssl.NonValidatingFactory"); // Отключаем проверку сертификата
 
-        // Подключаемся, передавая URL, логин и пароль отдельно
-        return DriverManager.getConnection(finalUrl, dbUser, dbPass);
+        return DriverManager.getConnection(finalUrl, props);
     }
 
     @Override public void onOpen(WebSocket conn, ClientHandshake handshake) {}
