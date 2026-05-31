@@ -37,26 +37,22 @@ public class ServerMain extends WebSocketServer {
 
         String finalUrl = dbUrl;
 
-        // 1. Отрезаем "jdbc:", если оно случайно уже там есть, чтобы не продублировать
+        // 1. Убираем старый "jdbc:", если он есть, чтобы применить единый формат
         if (finalUrl.startsWith("jdbc:")) {
             finalUrl = finalUrl.substring(5);
         }
 
-        // 2. Добавляем порт 5432, если Render прислал строку без него (причина ошибки Unable to parse)
+        // 2. Добавляем порт 5432, если его забыли указать
         if (!finalUrl.contains(":5432") && finalUrl.contains(".com/")) {
             finalUrl = finalUrl.replace(".com/", ".com:5432/");
         }
 
-        // 3. Собираем правильный итоговый JDBC URL
+        // 3. Собираем чистый JDBC URL
         finalUrl = "jdbc:" + finalUrl;
 
-        Properties props = new Properties();
-        props.setProperty("user", dbUser);
-        props.setProperty("password", dbPass);
-        props.setProperty("ssl", "true");
-        props.setProperty("sslmode", "require");
-
-        return DriverManager.getConnection(finalUrl, props);
+        // Инициализируем подключение напрямую через URL, логин и пароль.
+        // Драйвер Postgres сам автоматически выставит нужные параметры SSL для Render.
+        return DriverManager.getConnection(finalUrl, dbUser, dbPass);
     }
 
     @Override public void onOpen(WebSocket conn, ClientHandshake handshake) {}
