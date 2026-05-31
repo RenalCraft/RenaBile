@@ -16,11 +16,11 @@ public class ServerMain extends WebSocketServer {
     private final Map<WebSocket, String> activeSessions = new ConcurrentHashMap<>();
     private final Map<String, WebSocket> onlineUsers = new ConcurrentHashMap<>();
 
-    // Данные подключения из среды выполнения Render
-    private final String dbUrl = System.getenv("DATABASE_URL") != null ?
-            System.getenv("DATABASE_URL") : "jdbc:postgresql://dpg-d8drpdmk1jcs739b1t60-a.frankfurt-postgres.render.com:5432/renabile_db";
-    private final String dbUser = "renabile_db_user";
-    private final String dbPass = "Z6A4Hq5tNq639FAyWbJFaQjeUFQVYa78";
+    // Константы подключения (Фолбэк, если Render не передал переменные)
+    private static final String DEFAULT_HOST = "dpg-d8drpdmk1jcs739b1t60-a.frankfurt-postgres.render.com";
+    private static final String DB_NAME = "renabile_db";
+    private static final String DB_USER = "renabile_db_user";
+    private static final String DB_PASS = "Z6A4Hq5tNq639FAyWbJFaQjeUFQVYa78";
 
     public ServerMain(int port) {
         super(new InetSocketAddress(port));
@@ -28,42 +28,41 @@ public class ServerMain extends WebSocketServer {
 
     private Connection getFreshConnection() throws SQLException {
         try {
-            // Принудительно подгружаем драйвер PostgreSQL в память Java
             Class.forName("org.postgresql.Driver");
         } catch (ClassNotFoundException e) {
             System.err.println("[SERVER-DB] Драйвер PostgreSQL не найден!");
-            e.printStackTrace();
         }
 
-        String finalUrl = dbUrl;
+        String jdbcUrl;
+        String envUrl = System.getenv("DATABASE_URL");
 
-        // 1. Очищаем строку от параметров, если они там были, чтобы они не мешали
-        if (finalUrl.contains("?")) {
-            finalUrl = finalUrl.substring(0, finalUrl.indexOf("?"));
+        if (envUrl != null && !envUrl.isEmpty()) {
+            // Если Render передал нам нормальную строку, очищаем её от параметров
+            if (envUrl.contains("?")) {
+                envUrl = envUrl.substring(0, envUrl.indexOf("?"));
+            }
+            if (envUrl.startsWith("jdbc:")) {
+                envUrl = envUrl.substring(5);
+            }
+            if (!envUrl.contains(":5432") && envUrl.contains(".com/")) {
+                envUrl = envUrl.replace(".com/", ".com:5432/");
+            }
+            jdbcUrl = "jdbc:" + envUrl;
+        } else {
+            // Если переменной нет, собираем чистый URL из констант вручную
+            jdbcUrl = "jdbc:postgresql://" + DEFAULT_HOST + ":5432/" + DB_NAME;
         }
 
-        // 2. Убираем "jdbc:", если оно есть в начале, для чистки формата
-        if (finalUrl.startsWith("jdbc:")) {
-            finalUrl = finalUrl.substring(5);
-        }
-
-        // 3. Добавляем порт 5432, если его нет
-        if (!finalUrl.contains(":5432") && finalUrl.contains(".com/")) {
-            finalUrl = finalUrl.replace(".com/", ".com:5432/");
-        }
-
-        // 4. Собираем чистый базовый JDBC URL без лишних знаков ? и параметров
-        finalUrl = "jdbc:" + finalUrl;
-
-        // 5. Передаем все настройки SSL жестко через Properties. Облако Render это скушает на 100%
+        // Профессиональная настройка свойств подключения через Properties
         Properties props = new Properties();
-        props.setProperty("user", dbUser);
-        props.setProperty("password", dbPass);
+        props.setProperty("user", DB_USER);
+        props.setProperty("password", DB_PASS);
         props.setProperty("ssl", "true");
         props.setProperty("sslmode", "require");
-        props.setProperty("sslfactory", "org.postgresql.ssl.NonValidatingFactory"); // Отключаем проверку сертификата
+        props.setProperty("sslfactory", "org.postgresql.ssl.NonValidatingFactory"); // Игнорируем капризы сертификатов Render
+        props.setProperty("connectTimeout", "10"); // Чтобы сервер не зависал бесконечно при ошибке сети
 
-        return DriverManager.getConnection(finalUrl, props);
+        return DriverManager.getConnection(jdbcUrl, props);
     }
 
     @Override public void onOpen(WebSocket conn, ClientHandshake handshake) {}
