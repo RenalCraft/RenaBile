@@ -35,11 +35,20 @@ public class ServerMain extends WebSocketServer {
             e.printStackTrace();
         }
 
-        // Хитрый фикс строки подключения: если Render передал url без "jdbc:", мы добавляем его сами
         String finalUrl = dbUrl;
-        if (finalUrl.startsWith("postgresql://")) {
-            finalUrl = "jdbc:" + finalUrl;
+
+        // 1. Отрезаем "jdbc:", если оно случайно уже там есть, чтобы не продублировать
+        if (finalUrl.startsWith("jdbc:")) {
+            finalUrl = finalUrl.substring(5);
         }
+
+        // 2. Добавляем порт 5432, если Render прислал строку без него (причина ошибки Unable to parse)
+        if (!finalUrl.contains(":5432") && finalUrl.contains(".com/")) {
+            finalUrl = finalUrl.replace(".com/", ".com:5432/");
+        }
+
+        // 3. Собираем правильный итоговый JDBC URL
+        finalUrl = "jdbc:" + finalUrl;
 
         Properties props = new Properties();
         props.setProperty("user", dbUser);
