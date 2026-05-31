@@ -16,7 +16,6 @@ public class ServerMain extends WebSocketServer {
     private final Map<WebSocket, String> activeSessions = new ConcurrentHashMap<>();
     private final Map<String, WebSocket> onlineUsers = new ConcurrentHashMap<>();
 
-    // Константы подключения (Фолбэк, если Render не передал переменные)
     private static final String DEFAULT_HOST = "dpg-d8drpdmk1jcs739b1t60-a.frankfurt-postgres.render.com";
     private static final String DB_NAME = "renabile_db";
     private static final String DB_USER = "renabile_db_user";
@@ -37,7 +36,6 @@ public class ServerMain extends WebSocketServer {
         String envUrl = System.getenv("DATABASE_URL");
 
         if (envUrl != null && !envUrl.isEmpty()) {
-            // Если Render передал нам нормальную строку, очищаем её от параметров
             if (envUrl.contains("?")) {
                 envUrl = envUrl.substring(0, envUrl.indexOf("?"));
             }
@@ -49,29 +47,33 @@ public class ServerMain extends WebSocketServer {
             }
             jdbcUrl = "jdbc:" + envUrl;
         } else {
-            // Если переменной нет, собираем чистый URL из констант вручную
             jdbcUrl = "jdbc:postgresql://" + DEFAULT_HOST + ":5432/" + DB_NAME;
         }
 
-        // Профессиональная настройка свойств подключения через Properties
         Properties props = new Properties();
         props.setProperty("user", DB_USER);
         props.setProperty("password", DB_PASS);
         props.setProperty("ssl", "true");
         props.setProperty("sslmode", "require");
-        props.setProperty("sslfactory", "org.postgresql.ssl.NonValidatingFactory"); // Игнорируем капризы сертификатов Render
-        props.setProperty("connectTimeout", "10"); // Чтобы сервер не зависал бесконечно при ошибке сети
+        props.setProperty("sslfactory", "org.postgresql.ssl.NonValidatingFactory");
+        props.setProperty("connectTimeout", "10");
 
         return DriverManager.getConnection(jdbcUrl, props);
     }
 
-    @Override public void onOpen(WebSocket conn, ClientHandshake handshake) {}
+    @Override
+    public void onOpen(WebSocket conn, ClientHandshake handshake) {
+        // ЛОГ: Кто-то подключился
+        String ip = conn.getRemoteSocketAddress().getAddress().getHostAddress();
+        System.out.println("[СЕТЬ] Новое подключение! IP: " + ip);
+    }
 
     @Override
     public void onClose(WebSocket conn, int code, String reason, boolean remote) {
         String username = activeSessions.remove(conn);
         if (username != null) {
             onlineUsers.remove(username);
+            System.out.println("[СЕТЬ] Пользователь " + username + " отключился.");
             broadcastFriendListUpdate(username);
         }
     }
@@ -82,25 +84,34 @@ public class ServerMain extends WebSocketServer {
             JSONObject json = new JSONObject(message);
             String type = json.getString("type");
 
+            if ("PING".equals(type)) {
+                conn.send(new JSONObject().put("type", "PONG").toString());
+                return;
+            }
+
+            // Достаем внутренний объект "data"
+            JSONObject data = json.getJSONObject("data");
+
             switch (type) {
-                case "REG": handleRegister(conn, json); break;
-                case "AUTH": handleAuth(conn, json); break;
-                case "ADD_FRIEND": handleAddFriend(conn, json); break;
-                case "MSG": handleMessage(conn, json); break;
+                case "REG": handleRegister(conn, data); break;
+                case "AUTH": handleAuth(conn, data); break;
+                case "ADD_FRIEND": handleAddFriend(conn, data); break;
+                case "MSG": handleMessage(conn, data); break;
                 case "REFRESH_FRIENDS":
                     String me = activeSessions.get(conn);
                     if(me != null) sendFriendList(me, conn);
                     break;
-                case "PING":
-                    conn.send(new JSONObject().put("type", "PONG").toString());
-                    break;
             }
-        } catch (Exception e) { e.printStackTrace(); }
+        } catch (Exception e) {
+            System.err.println("[ОШИБКА ОБРАБОТКИ] " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 
-    private void handleRegister(WebSocket conn, JSONObject json) {
-        String user = json.getString("username").trim();
-        String pass = json.getString("password").trim();
+    private void handleRegister(WebSocket conn, JSONObject data) {
+        String user = data.getString("username").trim();
+        String pass = data.getString("password").trim();
+        String ip = conn.getRemoteSocketAddress().getAddress().getHostAddress();
 
         try (Connection db = getFreshConnection()) {
             PreparedStatement check = db.prepareStatement("SELECT 1 FROM users WHERE username = ?");
@@ -121,15 +132,22 @@ public class ServerMain extends WebSocketServer {
             insert.setString(1, user); insert.setString(2, pass); insert.setString(3, code);
             insert.executeUpdate();
 
-            JSONObject data = new JSONObject();
-            data.put("code", code);
-            sendResponse(conn, "REG_OK", data);
-        } catch (Exception e) { sendResponse(conn, "ERROR", e.getMessage()); }
+            // ЛОГ: Успешная регистрация
+            System.out.println("[БАЗА] Зарегистрирован новый юзер: " + user + " | Код: " + code + " | IP: " + ip);
+
+            JSONObject respData = new JSONObject();
+            respData.put("code", code);
+            sendResponse(conn, "REG_OK", respData);
+        } catch (Exception e) {
+            System.err.println("[ОШИБКА REG] " + e.getMessage());
+            sendResponse(conn, "ERROR", e.getMessage());
+        }
     }
 
-    private void handleAuth(WebSocket conn, JSONObject json) {
-        String user = json.getString("username").trim();
-        String pass = json.getString("password").trim();
+    private void handleAuth(WebSocket conn, JSONObject data) {
+        String user = data.getString("username").trim();
+        String pass = data.getString("password").trim();
+        String ip = conn.getRemoteSocketAddress().getAddress().getHostAddress();
 
         try (Connection db = getFreshConnection()) {
             PreparedStatement query = db.prepareStatement("SELECT user_code FROM users WHERE username = ? AND password = ?");
@@ -145,19 +163,25 @@ public class ServerMain extends WebSocketServer {
             activeSessions.put(conn, user);
             onlineUsers.put(user, conn);
 
-            JSONObject data = new JSONObject();
-            data.put("code", code);
-            sendResponse(conn, "AUTH_OK", data);
+            // ЛОГ: Успешный вход
+            System.out.println("[БАЗА] Юзер вошел в систему: " + user + " | Код: " + code + " | IP: " + ip);
+
+            JSONObject respData = new JSONObject();
+            respData.put("code", code);
+            sendResponse(conn, "AUTH_OK", respData);
 
             sendFriendList(user, conn);
             broadcastFriendListUpdate(user);
-        } catch (Exception e) { sendResponse(conn, "ERROR", e.getMessage()); }
+        } catch (Exception e) {
+            System.err.println("[ОШИБКА AUTH] " + e.getMessage());
+            sendResponse(conn, "ERROR", e.getMessage());
+        }
     }
 
-    private void handleAddFriend(WebSocket conn, JSONObject json) {
+    private void handleAddFriend(WebSocket conn, JSONObject data) {
         String me = activeSessions.get(conn);
         if (me == null) return;
-        String targetCode = json.getString("code").trim();
+        String targetCode = data.getString("code").trim();
 
         try (Connection db = getFreshConnection()) {
             PreparedStatement find = db.prepareStatement("SELECT username FROM users WHERE user_code = ?");
@@ -183,13 +207,13 @@ public class ServerMain extends WebSocketServer {
         } catch (Exception e) { e.printStackTrace(); }
     }
 
-    private void handleMessage(WebSocket conn, JSONObject json) {
+    private void handleMessage(WebSocket conn, JSONObject data) {
         String me = activeSessions.get(conn);
         if (me == null) return;
 
-        String toTarget = json.getString("to");
-        String text = json.getString("text");
-        String senderCode = json.getString("fromCode");
+        String toTarget = data.getString("to");
+        String text = data.getString("text");
+        String senderCode = data.getString("fromCode");
 
         JSONObject msgData = new JSONObject();
         msgData.put("from", toTarget.equals("GLOBAL") ? "GLOBAL" : senderCode);
@@ -258,7 +282,10 @@ public class ServerMain extends WebSocketServer {
     }
 
     @Override public void onError(WebSocket conn, Exception ex) {}
-    @Override public void onStart() { System.out.println("Java Core WebSocket Server онлайн."); }
+    @Override
+    public void onStart() {
+        System.out.println("Java Core WebSocket Server онлайн. Ожидание подключений...");
+    }
 
     public static void main(String[] args) {
         int port = 8080;
