@@ -14,9 +14,6 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 public class ServerMain extends WebSocketServer {
 
-    // Твой External Database URL для тестов сервера прямо с ПК
-    private static final String DEFAULT_DB_URL = "postgresql://renabile_db_user:Z6A4Hq5tNq639FAyWbJFaQjeUFQVYa78@dpg-d8drpdmk1jcs739b1t60-a.frankfurt-postgres.render.com/renabile_db";
-
     static class ChatMessage {
         String from;
         String to;
@@ -29,7 +26,7 @@ public class ServerMain extends WebSocketServer {
         }
     }
 
-    // Оперативная память для активных сессий
+    // Оперативная память для активных сессий (кто онлайн)
     private final Map<WebSocket, String> activeSessions = new ConcurrentHashMap<>();
     private final Map<String, WebSocket> onlineUsers = new ConcurrentHashMap<>();
     private final List<ChatMessage> globalHistory = new CopyOnWriteArrayList<>();
@@ -39,40 +36,49 @@ public class ServerMain extends WebSocketServer {
         initDatabase();
     }
 
-    // Подключение к PostgreSQL с авто-заменой протокола под JDBC
+    // ИСПРАВЛЕННЫЙ МЕТОД ПОДКЛЮЧЕНИЯ К БАЗЕ
     private Connection getConnection() throws SQLException {
         String dbUrl = System.getenv("DATABASE_URL"); // Если запущено на Render
-        if (dbUrl == null || dbUrl.isEmpty()) {
-            dbUrl = DEFAULT_DB_URL; // Если запускаешь на ПК
+
+        // 1. Если мы работаем внутри облака Render, используем автоматическую строку
+        if (dbUrl != null && !dbUrl.isEmpty()) {
+            if (dbUrl.startsWith("postgres://")) {
+                dbUrl = dbUrl.replace("postgres://", "jdbc:postgresql://");
+            } else if (dbUrl.startsWith("postgresql://")) {
+                dbUrl = dbUrl.replace("postgresql://", "jdbc:postgresql://");
+            }
+            return DriverManager.getConnection(dbUrl);
         }
 
-        // Пересобираем строку под стандарт JDBC драйвера
-        if (dbUrl.startsWith("postgres://")) {
-            dbUrl = dbUrl.replace("postgres://", "jdbc:postgresql://");
-        } else if (dbUrl.startsWith("postgresql://")) {
-            dbUrl = dbUrl.replace("postgresql://", "jdbc:postgresql://");
-        }
+        // 2. Если мы запускаем сервер ЛОКАЛЬНО на твоём ПК:
+        // Передаём параметры раздельно через Properties, чтобы драйвер не ругался на формат порта!
+        String url = "jdbc:postgresql://dpg-d8drpdmk1jcs739b1t60-a.frankfurt-postgres.render.com:5432/renabile_db";
 
-        return DriverManager.getConnection(dbUrl);
+        Properties props = new Properties();
+        props.setProperty("user", "renabile_db_user");
+        props.setProperty("password", "Z6A4Hq5tNq639FAyWbJFaQjeUFQVYa78");
+        props.setProperty("ssl", "true"); // Защита соединения (Render без неё сбросит подключение)
+
+        return DriverManager.getConnection(url, props);
     }
 
-    // Создание таблиц в базе, если их ещё нет
+    // Создание таблиц в PostgreSQL при первом старте
     private void initDatabase() {
         try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
-            // Таблица аккаунтов
+            // Создаем таблицу юзеров
             stmt.execute("CREATE TABLE IF NOT EXISTS users (" +
                     "username VARCHAR(50) PRIMARY KEY, " +
                     "password VARCHAR(100) NOT NULL, " +
                     "user_code VARCHAR(10) UNIQUE NOT NULL, " +
                     "avatar_base64 TEXT DEFAULT '')");
 
-            // Таблица связей друзей
+            // Создаем таблицу связей друзей
             stmt.execute("CREATE TABLE IF NOT EXISTS friends (" +
                     "username VARCHAR(50), " +
                     "friend_name VARCHAR(50), " +
                     "PRIMARY KEY (username, friend_name))");
 
-            System.out.println("[DB] База данных PostgreSQL успешно подключена и проверена.");
+            System.out.println("[DB] База данных PostgreSQL успешно подключена и проверена. Ошибок парсинга нет!");
         } catch (Exception e) {
             System.err.println("[DB Error] Критическая ошибка инициализации таблиц: " + e.getMessage());
         }
@@ -119,11 +125,10 @@ public class ServerMain extends WebSocketServer {
             PreparedStatement check = db.prepareStatement("SELECT 1 FROM users WHERE username = ?");
             check.setString(1, user);
             if (check.executeQuery().next()) {
-                sendResponse(conn, "REG_FAIL", "Этот логин уже занят!");
+                sendResponse(conn, "REG_FAIL", "Этот логин уже занято!");
                 return;
             }
 
-            // Генерируем уникальный тег #XXXX
             String code;
             Random rand = new Random();
             PreparedStatement checkCode = db.prepareStatement("SELECT 1 FROM users WHERE user_code = ?");
@@ -215,7 +220,6 @@ public class ServerMain extends WebSocketServer {
                 return;
             }
 
-            // Зеркальное добавление связей
             PreparedStatement add1 = db.prepareStatement("INSERT INTO friends VALUES (?, ?)");
             add1.setString(1, me);
             add1.setString(2, friendName);
@@ -348,7 +352,7 @@ public class ServerMain extends WebSocketServer {
     }
 
     @Override public void onStart() {
-        System.out.println("WebSocket-сервер RenaBile успешно запущен на порту: " + getPort());
+        System.out.println("WebSocket-сервер успешно запущен!");
     }
 
     public static void main(String[] args) {
