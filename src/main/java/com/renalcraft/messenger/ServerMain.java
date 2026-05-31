@@ -16,7 +16,7 @@ public class ServerMain extends WebSocketServer {
     private final Map<WebSocket, String> activeSessions = new ConcurrentHashMap<>();
     private final Map<String, WebSocket> onlineUsers = new ConcurrentHashMap<>();
 
-    // БЕЗОПАСНО: Данные подключения теперь берутся из среды выполнения Render
+    // Данные подключения из среды выполнения Render
     private final String dbUrl = System.getenv("DATABASE_URL") != null ?
             System.getenv("DATABASE_URL") : "jdbc:postgresql://dpg-d8drpdmk1jcs739b1t60-a.frankfurt-postgres.render.com:5432/renabile_db";
     private final String dbUser = "renabile_db_user";
@@ -27,12 +27,27 @@ public class ServerMain extends WebSocketServer {
     }
 
     private Connection getFreshConnection() throws SQLException {
+        try {
+            // Принудительно подгружаем драйвер PostgreSQL в память Java
+            Class.forName("org.postgresql.Driver");
+        } catch (ClassNotFoundException e) {
+            System.err.println("[SERVER-DB] Драйвер PostgreSQL не найден!");
+            e.printStackTrace();
+        }
+
+        // Хитрый фикс строки подключения: если Render передал url без "jdbc:", мы добавляем его сами
+        String finalUrl = dbUrl;
+        if (finalUrl.startsWith("postgresql://")) {
+            finalUrl = "jdbc:" + finalUrl;
+        }
+
         Properties props = new Properties();
         props.setProperty("user", dbUser);
         props.setProperty("password", dbPass);
         props.setProperty("ssl", "true");
         props.setProperty("sslmode", "require");
-        return DriverManager.getConnection(dbUrl, props);
+
+        return DriverManager.getConnection(finalUrl, props);
     }
 
     @Override public void onOpen(WebSocket conn, ClientHandshake handshake) {}
