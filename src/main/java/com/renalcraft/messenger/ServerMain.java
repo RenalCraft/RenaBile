@@ -29,7 +29,7 @@ public class ServerMain extends WebSocketServer {
         try {
             Class.forName("org.postgresql.Driver");
         } catch (ClassNotFoundException e) {
-            System.err.println("[SERVER-DB] Драйвер PostgreSQL не найден!");
+            System.err.println("[БАЗА ДАННЫХ] Драйвер PostgreSQL не найден!");
         }
 
         String envUrl = System.getenv("DATABASE_URL");
@@ -54,7 +54,7 @@ public class ServerMain extends WebSocketServer {
                     jdbcUrl = "jdbc:postgresql://" + hostAndDb;
                 }
             } catch (Exception e) {
-                System.err.println("[SERVER-DB] Ошибка автопарсинга DATABASE_URL: " + e.getMessage());
+                System.err.println("[БАЗА ДАННЫХ] Ошибка чтения конфигурации DATABASE_URL: " + e.getMessage());
             }
         }
 
@@ -73,7 +73,7 @@ public class ServerMain extends WebSocketServer {
 
     @Override
     public void onOpen(WebSocket conn, ClientHandshake handshake) {
-        System.out.println("[СЕТЬ] Новое MESH-подключение: " + conn.getRemoteSocketAddress().getAddress().getHostAddress());
+        System.out.println("[СЕТЬ] Новое подключение: " + conn.getRemoteSocketAddress().getAddress().getHostAddress());
     }
 
     @Override
@@ -81,7 +81,7 @@ public class ServerMain extends WebSocketServer {
         String username = activeSessions.remove(conn);
         if (username != null) {
             onlineUsers.remove(username);
-            System.out.println("[СЕТЬ] Юзер " + username + " ушел в оффлайн.");
+            System.out.println("[СЕТЬ] Пользователь " + username + " вышел из сети.");
             broadcastFriendListUpdate(username);
         }
     }
@@ -127,7 +127,7 @@ public class ServerMain extends WebSocketServer {
                     break;
             }
         } catch (Exception e) {
-            System.err.println("[СЕРВЕР] Ошибка парсинга пакета: " + e.getMessage());
+            System.err.println("[СЕРВЕР] Ошибка обработки пакета: " + e.getMessage());
         }
     }
 
@@ -140,7 +140,7 @@ public class ServerMain extends WebSocketServer {
             PreparedStatement check = db.prepareStatement("SELECT 1 FROM users WHERE username = ?");
             check.setString(1, user);
             if (check.executeQuery().next()) {
-                sendResponse(conn, "ERROR", new JSONObject().put("message", "Логин занят!"));
+                sendResponse(conn, "ERROR", new JSONObject().put("message", "Этот логин уже занят!"));
                 return;
             }
 
@@ -158,7 +158,10 @@ public class ServerMain extends WebSocketServer {
             activeSessions.put(conn, user);
             onlineUsers.put(user, conn);
 
-            JSONObject respData = new JSONObject().put("code", code).put("username", user);
+            JSONObject respData = new JSONObject()
+                    .put("code", code)
+                    .put("username", user)
+                    .put("avatar_base64", avatar);
             sendResponse(conn, "AUTH_OK", respData);
             sendFriendList(user, conn);
         } catch (Exception e) {
@@ -171,20 +174,24 @@ public class ServerMain extends WebSocketServer {
         String pass = data.getString("password").trim();
 
         try (Connection db = getFreshConnection()) {
-            PreparedStatement query = db.prepareStatement("SELECT user_code FROM users WHERE username = ? AND password = ?");
+            PreparedStatement query = db.prepareStatement("SELECT user_code, avatar_base64 FROM users WHERE username = ? AND password = ?");
             query.setString(1, user); query.setString(2, pass);
             ResultSet rs = query.executeQuery();
 
             if (!rs.next()) {
-                sendResponse(conn, "ERROR", new JSONObject().put("message", "Неверный ключ шифра!"));
+                sendResponse(conn, "ERROR", new JSONObject().put("message", "Неверный логин или пароль!"));
                 return;
             }
 
             String code = rs.getString("user_code");
+            String avatar = rs.getString("avatar_base64");
             activeSessions.put(conn, user);
             onlineUsers.put(user, conn);
 
-            JSONObject respData = new JSONObject().put("code", code).put("username", user);
+            JSONObject respData = new JSONObject()
+                    .put("code", code)
+                    .put("username", user)
+                    .put("avatar_base64", avatar != null ? avatar : "");
             sendResponse(conn, "AUTH_OK", respData);
 
             sendFriendList(user, conn);
@@ -216,7 +223,7 @@ public class ServerMain extends WebSocketServer {
             sendFriendList(me, conn);
             broadcastFriendListUpdate(me);
         } catch (Exception e) {
-            System.err.println("[БАЗА ОШИБКА] Профиль: " + e.getMessage());
+            System.err.println("[ОШИБКА БД] Обновление профиля: " + e.getMessage());
         }
     }
 
@@ -264,9 +271,7 @@ public class ServerMain extends WebSocketServer {
                 if (session.isOpen()) sendResponse(session, "MSG", msgData);
             }
         } else {
-            // Отправляем себе
             sendResponse(conn, "MSG", msgData);
-            // Отправляем другу
             try (Connection db = getFreshConnection()) {
                 PreparedStatement find = db.prepareStatement("SELECT username FROM users WHERE user_code = ?");
                 find.setString(1, toTarget);
@@ -296,8 +301,10 @@ public class ServerMain extends WebSocketServer {
                 String fName = rs.getString("username");
                 fJson.put("username", fName);
                 fJson.put("code", rs.getString("user_code"));
+
                 String dbAvatar = rs.getString("avatar_base64");
                 fJson.put("avatar", dbAvatar != null ? dbAvatar : "");
+
                 fJson.put("online", onlineUsers.containsKey(fName));
                 array.put(fJson);
             }
@@ -326,7 +333,7 @@ public class ServerMain extends WebSocketServer {
     }
 
     @Override public void onError(WebSocket conn, Exception ex) {}
-    @Override public void onStart() { System.out.println("[CORE] Java MESH Server запущен на порту 8080!"); }
+    @Override public void onStart() { System.out.println("[МЕНЕДЖЕР] Главный сервер запущен на порту 8080!"); }
 
     public static void main(String[] args) {
         int port = 8080;
