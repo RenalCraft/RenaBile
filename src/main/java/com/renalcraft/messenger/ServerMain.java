@@ -21,6 +21,13 @@ public class ServerMain extends WebSocketServer {
     private static final String DB_USER = "renabile_db_user";
     private static final String DB_PASS = "Z6A4Hq5tNq639FAyWbJFaQjeUFQVYa78";
 
+    // --- СИСТЕМА ОБНОВЛЕНИЙ ---
+    private static final String GITHUB_VERSION_URL = "https://raw.githubusercontent.com/RenalCraft/RenaBile-Updates/main/version.json";
+    private static int latestVersionCode = 1;
+    private static String latestVersionName = "v1.0";
+    private static String latestApkUrl = "";
+    // --------------------------
+
     public ServerMain(int port) {
         super(new InetSocketAddress(port));
     }
@@ -135,6 +142,7 @@ public class ServerMain extends WebSocketServer {
         String user = data.getString("username").trim();
         String pass = data.getString("password").trim();
         String avatar = data.optString("avatar", "").trim();
+        int clientVersionCode = data.optInt("versionCode", 1); // Получаем версию от телефона
 
         try (Connection db = getFreshConnection()) {
             PreparedStatement check = db.prepareStatement("SELECT 1 FROM users WHERE username = ?");
@@ -164,6 +172,10 @@ public class ServerMain extends WebSocketServer {
                     .put("avatar_base64", avatar);
             sendResponse(conn, "AUTH_OK", respData);
             sendFriendList(user, conn);
+
+            // Проверяем, нужно ли приложению обновиться
+            checkAndSendUpdateNotification(conn, clientVersionCode);
+
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -172,6 +184,7 @@ public class ServerMain extends WebSocketServer {
     private void handleAuth(WebSocket conn, JSONObject data) {
         String user = data.getString("username").trim();
         String pass = data.getString("password").trim();
+        int clientVersionCode = data.optInt("versionCode", 1); // Получаем версию от телефона
 
         try (Connection db = getFreshConnection()) {
             PreparedStatement query = db.prepareStatement("SELECT user_code, avatar_base64 FROM users WHERE username = ? AND password = ?");
@@ -196,6 +209,10 @@ public class ServerMain extends WebSocketServer {
 
             sendFriendList(user, conn);
             broadcastFriendListUpdate(user);
+
+            // Проверяем, нужно ли приложению обновиться
+            checkAndSendUpdateNotification(conn, clientVersionCode);
+
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -332,8 +349,50 @@ public class ServerMain extends WebSocketServer {
         if (conn != null && conn.isOpen()) conn.send(resp.toString());
     }
 
+    // --- МЕТОДЫ ДЛЯ АВТООБНОВЛЕНИЯ ЧЕРЕЗ СЕРВЕР ---
+
+    private static void checkGitHubUpdates() {
+        new Thread(() -> {
+            try {
+                java.net.URL url = new java.net.URL(GITHUB_VERSION_URL);
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(5000);
+
+                java.io.InputStream in = new java.io.BufferedInputStream(conn.getInputStream());
+                java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                byte[] buffer = new byte[1024];
+                int len;
+                while ((len = in.read(buffer)) != -1) {
+                    bo.write(buffer, 0, len);
+                }
+
+                JSONObject json = new JSONObject(bo.toString());
+                latestVersionCode = json.optInt("versionCode", 1);
+                latestVersionName = json.optString("versionName", "v1.0");
+                latestApkUrl = json.optString("apkUrl", "");
+                System.out.println("[ОБНОВЛЕНИЯ] Найдена актуальная версия на GitHub: " + latestVersionName + " (Code: " + latestVersionCode + ")");
+            } catch (Exception e) {
+                System.err.println("[ОБНОВЛЕНИЯ] Ошибка проверки файла конфигурации на GitHub: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    private void checkAndSendUpdateNotification(WebSocket conn, int clientVersionCode) {
+        if (latestVersionCode > clientVersionCode) {
+            JSONObject updateData = new JSONObject()
+                    .put("versionName", latestVersionName)
+                    .put("apkUrl", latestApkUrl);
+            sendResponse(conn, "NEW_UPDATE_AVAILABLE", updateData);
+            System.out.println("[ОБНОВЛЕНИЯ] Клиенту отправлено уведомление о новой версии " + latestVersionName);
+        }
+    }
+
     @Override public void onError(WebSocket conn, Exception ex) {}
-    @Override public void onStart() { System.out.println("[МЕНЕДЖЕР] Главный сервер запущен на порту 8080!"); }
+    @Override public void onStart() {
+        System.out.println("[МЕНЕДЖЕР] Главный сервер запущен на порту 8080!");
+        checkGitHubUpdates(); // Проверяем актуальный JSON при старте сервера
+    }
 
     public static void main(String[] args) {
         int port = 8080;
