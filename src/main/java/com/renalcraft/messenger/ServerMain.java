@@ -296,7 +296,8 @@ public class ServerMain extends WebSocketServer {
                 String fName = rs.getString("username");
                 fJson.put("username", fName);
                 fJson.put("code", rs.getString("user_code"));
-                fJson.put("avatar", rs.optString("avatar_base64", ""));
+                String dbAvatar = rs.getString("avatar_base64");
+                fJson.put("avatar", dbAvatar != null ? dbAvatar : "");
                 fJson.put("online", onlineUsers.containsKey(fName));
                 array.put(fJson);
             }
