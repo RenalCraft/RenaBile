@@ -16,7 +16,7 @@ public class ServerMain extends WebSocketServer {
     private final Map<WebSocket, String> activeSessions = new ConcurrentHashMap<>();
     private final Map<String, WebSocket> onlineUsers = new ConcurrentHashMap<>();
 
-    // Полный хост для корректного резервного подключения
+    // Полный хост для локального/резервного подключения
     private static final String DEFAULT_HOST = "dpg-d8drpdmk1jcs739b1t60-a.frankfurt-postgres.render.com";
     private static final String DB_NAME = "renabile_db";
     private static final String DB_USER = "renabile_db_user";
@@ -40,41 +40,19 @@ public class ServerMain extends WebSocketServer {
             System.err.println("[БАЗА ДАННЫХ] Драйвер PostgreSQL не найден!");
         }
 
-        // Берем переменную DATABASE_URL (обычно Render подставляет её автоматически)
+        // Читаем переменную из панели Render (Environment)
         String envUrl = System.getenv("DATABASE_URL");
-        String jdbcUrl = null;
-        String user = DB_USER;
-        String pass = DB_PASS;
 
+        // Если переменная задана, используем её напрямую без авто-исправлений
         if (envUrl != null && !envUrl.isEmpty()) {
-            // Исправляем префикс протокола для Java JDBC
-            if (envUrl.startsWith("postgresql://")) {
-                jdbcUrl = envUrl.replace("postgresql://", "jdbc:postgresql://");
-            } else if (envUrl.startsWith("jdbc:postgresql://")) {
-                jdbcUrl = envUrl;
-            }
-
-            // Если Render прислал URL без явного указания порта, добавляем его перед именем БД
-            if (jdbcUrl != null && !jdbcUrl.contains(":5432") && jdbcUrl.contains("/" + DB_NAME)) {
-                jdbcUrl = jdbcUrl.replace("/" + DB_NAME, ":5432/" + DB_NAME);
-            }
+            return DriverManager.getConnection(envUrl);
         }
 
-        // Если переменной окружения нет, собираем правильный URL вручную
-        if (jdbcUrl == null) {
-            jdbcUrl = "jdbc:postgresql://" + DEFAULT_HOST + ":5432/" + DB_NAME;
-            user = DB_USER;
-            pass = DB_PASS;
-        }
+        // Запасной вариант (если переменной окружения нет, например локально)
+        String jdbcUrl = "jdbc:postgresql://" + DEFAULT_HOST + ":5432/" + DB_NAME
+                + "?ssl=true&sslmode=require&sslfactory=org.postgresql.ssl.NonValidatingFactory&allowEncodingChanges=true&connectTimeout=10";
 
-        // Навешиваем обязательные SSL параметры для безопасного подключения к Render
-        if (!jdbcUrl.contains("?")) {
-            jdbcUrl += "?ssl=true&sslmode=require&sslfactory=org.postgresql.ssl.NonValidatingFactory&allowEncodingChanges=true&connectTimeout=10";
-        } else if (!jdbcUrl.contains("sslfactory")) {
-            jdbcUrl += "&ssl=true&sslmode=require&sslfactory=org.postgresql.ssl.NonValidatingFactory&allowEncodingChanges=true&connectTimeout=10";
-        }
-
-        return DriverManager.getConnection(jdbcUrl, user, pass);
+        return DriverManager.getConnection(jdbcUrl, DB_USER, DB_PASS);
     }
 
     @Override
