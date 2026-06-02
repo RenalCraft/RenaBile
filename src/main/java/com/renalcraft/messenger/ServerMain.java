@@ -41,27 +41,14 @@ public class ServerMain extends WebSocketServer {
 
         String envUrl = System.getenv("DATABASE_URL");
         String jdbcUrl = null;
-        String user = null;
-        String pass = null;
+        String user = DB_USER;
+        String pass = DB_PASS;
 
         if (envUrl != null && !envUrl.isEmpty()) {
-            try {
-                String cleanUrl = envUrl.replace("postgresql://", "").replace("jdbc:postgresql://", "");
-                String[] userInfoAndRest = cleanUrl.split("@");
-                if (userInfoAndRest.length == 2) {
-                    String[] credentials = userInfoAndRest[0].split(":");
-                    user = credentials[0];
-                    pass = credentials[1];
-                    String hostAndDb = userInfoAndRest[1];
-                    if (hostAndDb.contains(".frankfurt-postgres.render.com")) {
-                        hostAndDb = hostAndDb.replace(".frankfurt-postgres.render.com", ":5432");
-                    } else if (!hostAndDb.contains(":5432")) {
-                        hostAndDb = hostAndDb.replace("/", ":5432/");
-                    }
-                    jdbcUrl = "jdbc:postgresql://" + hostAndDb;
-                }
-            } catch (Exception e) {
-                System.err.println("[БАЗА ДАННЫХ] Ошибка чтения конфигурации DATABASE_URL: " + e.getMessage());
+            if (envUrl.startsWith("postgresql://")) {
+                jdbcUrl = envUrl.replace("postgresql://", "jdbc:postgresql://");
+            } else if (envUrl.startsWith("jdbc:postgresql://")) {
+                jdbcUrl = envUrl;
             }
         }
 
@@ -142,7 +129,7 @@ public class ServerMain extends WebSocketServer {
         String user = data.getString("username").trim();
         String pass = data.getString("password").trim();
         String avatar = data.optString("avatar", "").trim();
-        int clientVersionCode = data.optInt("versionCode", 1); // Получаем версию от телефона
+        int clientVersionCode = data.optInt("versionCode", 1);
 
         try (Connection db = getFreshConnection()) {
             PreparedStatement check = db.prepareStatement("SELECT 1 FROM users WHERE username = ?");
@@ -173,7 +160,6 @@ public class ServerMain extends WebSocketServer {
             sendResponse(conn, "AUTH_OK", respData);
             sendFriendList(user, conn);
 
-            // Проверяем, нужно ли приложению обновиться
             checkAndSendUpdateNotification(conn, clientVersionCode);
 
         } catch (Exception e) {
@@ -184,7 +170,7 @@ public class ServerMain extends WebSocketServer {
     private void handleAuth(WebSocket conn, JSONObject data) {
         String user = data.getString("username").trim();
         String pass = data.getString("password").trim();
-        int clientVersionCode = data.optInt("versionCode", 1); // Получаем версию от телефона
+        int clientVersionCode = data.optInt("versionCode", 1);
 
         try (Connection db = getFreshConnection()) {
             PreparedStatement query = db.prepareStatement("SELECT user_code, avatar_base64 FROM users WHERE username = ? AND password = ?");
@@ -210,7 +196,6 @@ public class ServerMain extends WebSocketServer {
             sendFriendList(user, conn);
             broadcastFriendListUpdate(user);
 
-            // Проверяем, нужно ли приложению обновиться
             checkAndSendUpdateNotification(conn, clientVersionCode);
 
         } catch (Exception e) {
@@ -349,8 +334,6 @@ public class ServerMain extends WebSocketServer {
         if (conn != null && conn.isOpen()) conn.send(resp.toString());
     }
 
-    // --- МЕТОДЫ ДЛЯ АВТООБНОВЛЕНИЯ ЧЕРЕЗ СЕРВЕР ---
-
     private static void checkGitHubUpdates() {
         new Thread(() -> {
             try {
@@ -391,7 +374,7 @@ public class ServerMain extends WebSocketServer {
     @Override public void onError(WebSocket conn, Exception ex) {}
     @Override public void onStart() {
         System.out.println("[МЕНЕДЖЕР] Главный сервер запущен на порту 8080!");
-        checkGitHubUpdates(); // Проверяем актуальный JSON при старте сервера
+        checkGitHubUpdates();
     }
 
     public static void main(String[] args) {
