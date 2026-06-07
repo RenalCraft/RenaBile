@@ -46,6 +46,7 @@ public class ServerMain extends WebSocketServer {
         if (rawDatabaseUrl == null || rawDatabaseUrl.isEmpty()) {
             System.out.println("[WARNING] DATABASE_URL env variable is not set! SQL connections cannot establish.");
         } else {
+            rawDatabaseUrl = rawDatabaseUrl.trim();
             databaseUrl = convertToJdbcUrl(rawDatabaseUrl);
             System.out.println("[SERVER] Database URL converted to standard JDBC format.");
         }
@@ -63,6 +64,7 @@ public class ServerMain extends WebSocketServer {
         if (rawUrl == null || rawUrl.isEmpty()) {
             return rawUrl;
         }
+        rawUrl = rawUrl.trim();
         if (rawUrl.startsWith("jdbc:postgresql://")) {
             return rawUrl;
         }
@@ -206,16 +208,27 @@ public class ServerMain extends WebSocketServer {
             // Migration alter scripts (safe even if columns already exist)
             try {
                 stmt.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password VARCHAR(255);");
-                stmt.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS code VARCHAR(4);");
-                stmt.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;");
-                stmt.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS online BOOLEAN DEFAULT FALSE;");
-                // Try making code unique if it isn't
-                try {
-                    stmt.execute("ALTER TABLE users ADD CONSTRAINT unique_code UNIQUE (code);");
-                } catch (SQLException ignored) {}
             } catch (SQLException e) {
-                System.out.println("[DB Migration] Users alter info: " + e.getMessage());
+                System.out.println("[DB Migration] Users alter password info: " + e.getMessage());
             }
+            try {
+                stmt.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS code VARCHAR(4);");
+            } catch (SQLException e) {
+                System.out.println("[DB Migration] Users alter code info: " + e.getMessage());
+            }
+            try {
+                stmt.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;");
+            } catch (SQLException e) {
+                System.out.println("[DB Migration] Users alter avatar info: " + e.getMessage());
+            }
+            try {
+                stmt.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS online BOOLEAN DEFAULT FALSE;");
+            } catch (SQLException e) {
+                System.out.println("[DB Migration] Users alter online info: " + e.getMessage());
+            }
+            try {
+                stmt.execute("ALTER TABLE users ADD CONSTRAINT unique_code UNIQUE (code);");
+            } catch (SQLException ignored) {}
 
             // Verify Friendships Table
             stmt.execute("CREATE TABLE IF NOT EXISTS friendships (" +
