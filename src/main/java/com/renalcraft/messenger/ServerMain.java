@@ -1,4 +1,4 @@
-package com.renalcraft.messenger.server;
+package com.renalcraft.messenger;
 
 import org.java_websocket.WebSocket;
 import org.java_websocket.handshake.ClientHandshake;
@@ -7,286 +7,603 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.sql.*;
+import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class ServerMain extends WebSocketServer {
 
-    private final Map<WebSocket, String> activeConnections = new ConcurrentHashMap<>();
-    private final Map<String, WebSocket> onlineUsers = new ConcurrentHashMap<>();
-    private final Map<WebSocket, String> userCodes = new ConcurrentHashMap<>();
+    private static final int DEFAULT_PORT = 8080;
+    private static Connection dbConn = null;
+    private static String databaseUrl = null;
 
-    private static final String DEFAULT_HOST = "dpg-d8drpdmk1jcs739b1t60-a.frankfurt-postgres.render.com";
-    private static final String DB_NAME = "renabile_db";
-    private static final String DB_USER = "renabile_db_user";
-    private static final String DB_PASS = "Z6A4Hq5tNq639FAyWbJFaQjeUFQVYa78";
+    // Thread-safe map: userCode -> Active WebSocket connection
+    private final Map<String, WebSocket> activeConnections = new ConcurrentHashMap<>();
+    // Reverse map: WebSocket -> authenticated userCode (to manage offlines faster)
+    private final Map<WebSocket, String> socketUserCodes = new ConcurrentHashMap<>();
 
-    public ServerMain(int port) { super(new InetSocketAddress(port)); }
-
-    private Connection getConnection() throws SQLException {
-        String envUrl = System.getenv("DATABASE_URL");
-        if (envUrl != null && !envUrl.isEmpty()) return DriverManager.getConnection(envUrl);
-        String url = "jdbc:postgresql://" + DEFAULT_HOST + ":5432/" + DB_NAME + "?ssl=true&sslmode=require&sslfactory=org.postgresql.ssl.NonValidatingFactory";
-        return DriverManager.getConnection(url, DB_USER, DB_PASS);
+    public ServerMain(int port) {
+        super(new InetSocketAddress(port));
     }
 
-    private String computeHash(String text) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] h = md.digest(text.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (byte b : h) sb.append(String.format("%02x", b));
-            return sb.toString().toLowerCase();
-        } catch (Exception e) { return text.toLowerCase(); }
-    }
-
-    private boolean passwordMatches(String incomingPassword, String storedPassword) {
-        if (incomingPassword == null || storedPassword == null) return false;
-
-        String incomingLower = incomingPassword.toLowerCase();
-        String storedLower = storedPassword.toLowerCase();
-
-        // 1. Прямое совпадение
-        if (incomingLower.equals(storedLower)) return true;
-
-        // 2. Однократное хэширование
-        String hashedOnce = computeHash(incomingPassword);
-        if (hashedOnce.equals(storedLower)) return true;
-
-        // 3. Двойное хэширование
-        String doubleHashed = computeHash(hashedOnce);
-        if (doubleHashed.equals(storedLower)) return true;
-
-        return false;
-    }
-
-    private String hashPasswordForStorage(String pass) {
-        if (pass.length() == 64 && pass.matches("^[0-9a-fA-F]+$")) {
-            return pass.toLowerCase();
-        }
-        return computeHash(pass);
-    }
-
-    @Override public void onOpen(WebSocket conn, ClientHandshake handshake) {
-        System.out.println("[ВХОД] Новое сетевое подключение со стороны: " + conn.getRemoteSocketAddress());
-    }
-
-    @Override
-    public void onClose(WebSocket conn, int code, String reason, boolean remote) {
-        String user = activeConnections.remove(conn);
-        userCodes.remove(conn);
-        if (user != null) {
-            System.out.println("[СЕТЬ] Пользователь " + user + " отключился.");
-            onlineUsers.remove(user);
-            broadcastStatusUpdate(user);
-        }
-    }
-
-    @Override
-    public void onMessage(WebSocket conn, String rawMessage) {
-        try {
-            String[] lines = rawMessage.split("\n");
-            for (String line : lines) {
-                if (line.trim().isEmpty()) continue;
-                JSONObject packet = new JSONObject(line.trim());
-                String type = packet.optString("type");
-                JSONObject data = packet.optJSONObject("data");
-
-                switch (type) {
-                    case "REG": handleRegister(conn, data); break;
-                    case "AUTH": handleAuth(conn, data); break;
-                    case "MSG": handleMessage(conn, data); break;
-                    case "ADD_FRIEND": handleAddFriend(conn, data); break;
-                    case "GET_HISTORY": if (data != null) sendRoomHistory(conn, data.optString("room")); break;
-                }
-            }
-        } catch (Exception e) { e.printStackTrace(); }
-    }
-
-    private void handleRegister(WebSocket conn, JSONObject data) throws Exception {
-        String user = data.optString("username").trim();
-        String pass = hashPasswordForStorage(data.optString("password").trim());
-        String av = data.optString("avatar", "");
-
-        try (Connection db = getConnection()) {
-            PreparedStatement check = db.prepareStatement("SELECT username FROM users WHERE username = ?");
-            check.setString(1, user);
-            if (check.executeQuery().next()) {
-                conn.send(new JSONObject().put("type", "ERROR").put("data", new JSONObject().put("message", "Логин занят")).toString());
-                return;
-            }
-
-            String code = String.format("%04d", new Random().nextInt(10000));
-            PreparedStatement ins = db.prepareStatement("INSERT INTO users (username, password, user_code, avatar_base64) VALUES (?, ?, ?, ?)");
-            ins.setString(1, user); ins.setString(2, pass); ins.setString(3, code); ins.setString(4, av);
-            ins.executeUpdate();
-
-            authorize(conn, user, code);
-        }
-    }
-
-    private void handleAuth(WebSocket conn, JSONObject data) throws Exception {
-        String user = data.optString("username").trim();
-        String pass = data.optString("password").trim();
-
-        try (Connection db = getConnection()) {
-            PreparedStatement ps = db.prepareStatement("SELECT password, user_code FROM users WHERE username = ?");
-            ps.setString(1, user);
-            ResultSet rs = ps.executeQuery();
-            if (rs.next()) {
-                String storedPassword = rs.getString("password");
-                if (passwordMatches(pass, storedPassword)) {
-                    authorize(conn, user, rs.getString("user_code"));
-                } else {
-                    conn.send(new JSONObject().put("type", "ERROR").put("data", new JSONObject().put("message", "Неверный пароль")).toString());
-                }
-            } else {
-                conn.send(new JSONObject().put("type", "ERROR").put("data", new JSONObject().put("message", "Неверные данные входа")).toString());
+    public static void main(String[] args) {
+        // Resolve PORT
+        int port = DEFAULT_PORT;
+        String portEnv = System.getenv("PORT");
+        if (portEnv != null && !portEnv.isEmpty()) {
+            try {
+                port = Integer.parseInt(portEnv);
+            } catch (NumberFormatException e) {
+                System.err.println("[SERVER] Custom port parse error, utilizing fallback 8080");
             }
         }
-    }
 
-    private void authorize(WebSocket conn, String user, String code) throws Exception {
-        activeConnections.put(conn, user);
-        onlineUsers.put(user, conn);
-        userCodes.put(conn, code);
-
-        conn.send(new JSONObject().put("type", "AUTH_OK").put("data", new JSONObject().put("username", user).put("code", code)).toString());
-        sendRoomHistory(conn, "GLOBAL");
-        sendFriendsList(conn, user);
-        broadcastStatusUpdate(user);
-    }
-
-    private void handleAddFriend(WebSocket conn, JSONObject data) throws Exception {
-        String myUsername = activeConnections.get(conn);
-        if (myUsername == null || data == null) return;
-        String friendCode = data.optString("code").trim();
-
-        try (Connection db = getConnection()) {
-            PreparedStatement findFriend = db.prepareStatement("SELECT username FROM users WHERE user_code = ?");
-            findFriend.setString(1, friendCode);
-            ResultSet rs = findFriend.executeQuery();
-
-            if (!rs.next()) {
-                conn.send(new JSONObject().put("type", "ERROR").put("data", new JSONObject().put("message", "Пользователь с таким кодом не найден")).toString());
-                return;
+        // Initialize Database URL
+        databaseUrl = System.getenv("DATABASE_URL");
+        if (databaseUrl == null || databaseUrl.isEmpty()) {
+            System.out.println("[WARNING] DATABASE_URL env variable is not set! SQL connections cannot establish.");
+        } else {
+            // Adjust Render postgresql:// protocol prefix to standard jdbc:postgresql://
+            if (databaseUrl.startsWith("postgresql://")) {
+                databaseUrl = "jdbc:" + databaseUrl;
             }
-            String friendUsername = rs.getString("username");
-
-            if (myUsername.equals(friendUsername)) {
-                conn.send(new JSONObject().put("type", "ERROR").put("data", new JSONObject().put("message", "Нельзя добавить себя")).toString());
-                return;
-            }
-
-            PreparedStatement ins1 = db.prepareStatement(
-                    "INSERT INTO friends (username, friend_name) VALUES (?, ?) ON CONFLICT DO NOTHING");
-            ins1.setString(1, myUsername);
-            ins1.setString(2, friendUsername);
-            ins1.executeUpdate();
-
-            PreparedStatement ins2 = db.prepareStatement(
-                    "INSERT INTO friends (username, friend_name) VALUES (?, ?) ON CONFLICT DO NOTHING");
-            ins2.setString(1, friendUsername);
-            ins2.setString(2, myUsername);
-            ins2.executeUpdate();
-
-            sendFriendsList(conn, myUsername);
-            sendRoomHistory(conn, friendCode);
-
-            WebSocket targetSocket = onlineUsers.get(friendUsername);
-            if (targetSocket != null && targetSocket.isOpen()) {
-                sendFriendsList(targetSocket, friendUsername);
-
-                String myCode = userCodes.get(conn);
-                if (myCode != null) {
-                    sendRoomHistory(targetSocket, myCode);
-                }
-            }
-        }
-    }
-
-    private void handleMessage(WebSocket conn, JSONObject data) throws Exception {
-        String sender = activeConnections.get(conn);
-        if (sender == null) return;
-        String to = data.optString("to");
-        String text = data.optString("text");
-        String fromCode = data.optString("fromCode");
-
-        try (Connection db = getConnection()) {
-            PreparedStatement ps = db.prepareStatement("INSERT INTO messages (room, sender, text) VALUES (?, ?, ?)");
-            ps.setString(1, to); ps.setString(2, sender); ps.setString(3, text);
-            ps.executeUpdate();
-
-            JSONObject msg = new JSONObject().put("type", "MSG").put("data", new JSONObject()
-                    .put("senderName", sender).put("text", text).put("from", to.equals("GLOBAL") ? "GLOBAL" : fromCode));
-
-            if (to.equals("GLOBAL")) {
-                for (WebSocket ws : activeConnections.keySet()) {
-                    if (ws.isOpen()) ws.send(msg.toString());
-                }
-            } else {
-                conn.send(msg.toString());
-                PreparedStatement find = db.prepareStatement("SELECT username FROM users WHERE user_code = ?");
-                find.setString(1, to);
-                ResultSet rs = find.executeQuery();
-                if (rs.next()) {
-                    WebSocket target = onlineUsers.get(rs.getString("username"));
-                    if (target != null && target.isOpen()) {
-                        JSONObject receiverMsg = new JSONObject().put("type", "MSG").put("data", new JSONObject()
-                                .put("senderName", sender).put("text", text).put("from", fromCode));
-                        target.send(receiverMsg.toString());
+            // Append SSL configuration if on cloud databases (Render, Elephantsql, Neon...)
+            if (databaseUrl.contains("render.com") || databaseUrl.contains("aws") || databaseUrl.contains("neon.tech")) {
+                if (!databaseUrl.contains("sslmode=")) {
+                    if (databaseUrl.contains("?")) {
+                        databaseUrl += "&sslmode=require";
+                    } else {
+                        databaseUrl += "?sslmode=require";
                     }
                 }
             }
         }
+
+        // Setup tables
+        initDbSchema();
+
+        // Start server
+        ServerMain server = new ServerMain(port);
+        server.start();
+        System.out.println("[RenaBile Java Server] Server successfully started on port: " + port);
     }
 
-    private void sendRoomHistory(WebSocket conn, String room) throws Exception {
-        try (Connection db = getConnection()) {
-            PreparedStatement ps = db.prepareStatement("SELECT sender, text, to_char(timestamp, 'HH24:MI') as time FROM messages WHERE room = ? ORDER BY timestamp ASC");
-            ps.setString(1, room);
-            ResultSet rs = ps.executeQuery();
-            JSONArray arr = new JSONArray();
-            while (rs.next()) {
-                arr.put(new JSONObject().put("sender", rs.getString("sender")).put("text", rs.getString("text")).put("time", rs.getString("time")));
+    private static synchronized Connection getConnection() throws SQLException {
+        if (dbConn == null || dbConn.isClosed()) {
+            if (databaseUrl == null) {
+                throw new SQLException("DATABASE_URL not configured. Ensure Environment Variables are updated on Render.");
             }
-            conn.send(new JSONObject().put("type", "MSG_HISTORY").put("data", new JSONObject().put("room", room).put("history", arr)).toString());
+            dbConn = DriverManager.getConnection(databaseUrl);
+        }
+        return dbConn;
+    }
+
+    private static void initDbSchema() {
+        if (databaseUrl == null) return;
+        try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
+            // Verify Users Table
+            stmt.execute("CREATE TABLE IF NOT EXISTS users (" +
+                    "username VARCHAR(255) PRIMARY KEY, " +
+                    "password VARCHAR(255) NOT NULL, " +
+                    "code VARCHAR(4) UNIQUE NOT NULL, " +
+                    "avatar TEXT, " +
+                    "online BOOLEAN DEFAULT FALSE" +
+                    ");");
+            System.out.println("[DB] Users table verified.");
+
+            // Verify Friendships Table
+            stmt.execute("CREATE TABLE IF NOT EXISTS friendships (" +
+                    "user_code VARCHAR(4) NOT NULL, " +
+                    "friend_code VARCHAR(4) NOT NULL, " +
+                    "PRIMARY KEY (user_code, friend_code)" +
+                    ");");
+            System.out.println("[DB] Friendships table verified.");
+
+            // Verify Messages Table
+            stmt.execute("CREATE TABLE IF NOT EXISTS messages (" +
+                    "id SERIAL PRIMARY KEY, " +
+                    "room VARCHAR(255) NOT NULL, " +
+                    "sender VARCHAR(255) NOT NULL, " +
+                    "sender_code VARCHAR(4) NOT NULL, " +
+                    "text TEXT NOT NULL, " +
+                    "time VARCHAR(30) NOT NULL, " +
+                    "timestamp BIGINT NOT NULL" +
+                    ");");
+            System.out.println("[DB] Messages table verified.");
+
+            // Mark everyone offline on startup
+            stmt.execute("UPDATE users SET online = false;");
+            System.out.println("[DB] Marked all static user profiles offline.");
+
+        } catch (SQLException e) {
+            System.err.println("[DB] Critical failure setting up DB Tables: " + e.getMessage());
         }
     }
 
-    private void sendFriendsList(WebSocket conn, String user) throws Exception {
-        try (Connection db = getConnection()) {
-            PreparedStatement ps = db.prepareStatement("SELECT u.username, u.user_code, u.avatar_base64 FROM friends f JOIN users u ON f.friend_name = u.username WHERE f.username = ?");
-            ps.setString(1, user);
-            ResultSet rs = ps.executeQuery();
-            JSONArray arr = new JSONArray();
-            while (rs.next()) {
-                String fName = rs.getString("username");
-                arr.put(new JSONObject().put("username", fName).put("code", rs.getString("user_code"))
-                        .put("avatar", rs.getString("avatar_base64") != null ? rs.getString("avatar_base64") : "")
-                        .put("online", onlineUsers.containsKey(fName)));
+    @Override
+    public void onOpen(WebSocket conn, ClientHandshake handshake) {
+        System.out.println("[Connection] Client established connection. IP: " + conn.getRemoteSocketAddress());
+    }
+
+    @Override
+    public void onClose(WebSocket conn, int code, String reason, boolean remote) {
+        System.out.println("[Connection] Client socket closed: " + conn.getRemoteSocketAddress());
+        String userCode = socketUserCodes.remove(conn);
+        if (userCode != null) {
+            activeConnections.remove(userCode);
+            try (Connection db = getConnection(); PreparedStatement ps = db.prepareStatement("UPDATE users SET online = false WHERE code = ?")) {
+                ps.setString(1, userCode);
+                ps.executeUpdate();
+                System.out.println("[Status] User offline: #" + userCode);
+
+                // Alert teammates of status change
+                broadcastToFriends(userCode);
+            } catch (SQLException e) {
+                System.err.println("[Connection] Error setting offline in DB: " + e.getMessage());
             }
-            conn.send(new JSONObject().put("type", "FRIENDS_LIST").put("data", new JSONObject().put("list", arr)).toString());
         }
     }
 
-    private void broadcastStatusUpdate(String user) {
-        try (Connection db = getConnection()) {
-            PreparedStatement ps = db.prepareStatement("SELECT friend_name FROM friends WHERE username = ?");
-            ps.setString(1, user);
-            ResultSet rs = ps.executeQuery();
-            while (rs.next()) {
-                WebSocket ws = onlineUsers.get(rs.getString("friend_name"));
-                if (ws != null && ws.isOpen()) sendFriendsList(ws, rs.getString("friend_name"));
+    @Override
+    public void onMessage(WebSocket conn, String message) {
+        // Handle incoming lines as client can package messages with \n
+        String[] lines = message.split("\n");
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) continue;
+
+            try {
+                JSONObject packet = new JSONObject(trimmed);
+                handlePacket(conn, packet);
+            } catch (Exception e) {
+                System.err.println("[Parser] Failed to process parsed packet line: " + e.getMessage());
+                sendError(conn, "Неправильный формат запроса");
             }
-        } catch (Exception e) { e.printStackTrace(); }
+        }
     }
 
-    @Override public void onError(WebSocket conn, Exception ex) {}
-    @Override public void onStart() { System.out.println("[СЕРВЕР] Работает..."); }
+    @Override
+    public void onError(WebSocket conn, Exception ex) {
+        System.err.println("[Socket Error] Exception thrown on socket: " + ex.getMessage());
+    }
 
-    public static void main(String[] args) { new ServerMain(8080).start(); }
+    @Override
+    public void onStart() {
+        System.out.println("[Server Engine] Listening for incoming secure WebSocket handshake requests...");
+    }
+
+    private void handlePacket(WebSocket conn, JSONObject packet) throws Exception {
+        String type = packet.optString("type");
+        JSONObject data = packet.optJSONObject("data");
+
+        if (type == null || type.isEmpty() || data == null) {
+            sendError(conn, "Метаданные пакета повреждены");
+            return;
+        }
+
+        System.out.println("[Server Packet] Received packet type: " + type);
+
+        switch (type) {
+            case "REG":
+                handleRegister(conn, data);
+                break;
+            case "AUTH":
+                handleAuth(conn, data);
+                break;
+            case "ADD_FRIEND":
+                handleAddFriend(conn, data);
+                break;
+            case "GET_HISTORY":
+                handleGetHistory(conn, data);
+                break;
+            case "MSG":
+                handleSendMessage(conn, data);
+                break;
+            default:
+                sendError(conn, "Неизвестный тип пакета: " + type);
+        }
+    }
+
+    private void handleRegister(WebSocket conn, JSONObject data) {
+        String username = data.optString("username", "").trim();
+        String password = data.optString("password", "").trim().toLowerCase();
+        String avatar = data.optString("avatar", "");
+
+        if (username.isEmpty() || password.isEmpty()) {
+            sendError(conn, "Заполните все обязательные поля");
+            return;
+        }
+
+        try (Connection db = getConnection()) {
+            // Check username availability
+            try (PreparedStatement psUser = db.prepareStatement("SELECT 1 FROM users WHERE LOWER(username) = ? LIMIT 1")) {
+                psUser.setString(1, username.toLowerCase());
+                try (ResultSet rs = psUser.executeQuery()) {
+                    if (rs.next()) {
+                        sendError(conn, "Код ошибки 409: Пользователь с таким именем уже существует");
+                        return;
+                    }
+                }
+            }
+
+            // Create unique code
+            String code = generateUniqueCode(db);
+
+            // Register
+            try (PreparedStatement psReg = db.prepareStatement("INSERT INTO users (username, password, code, avatar, online) VALUES (?, ?, ?, ?, ?)")) {
+                psReg.setString(1, username);
+                psReg.setString(2, password);
+                psReg.setString(3, code);
+                psReg.setString(4, avatar);
+                psReg.setBoolean(5, true);
+                psReg.executeUpdate();
+            }
+
+            // Link connection maps
+            activeConnections.put(code, conn);
+            socketUserCodes.put(conn, code);
+
+            System.out.println("[REG] New Java User: " + username + " with code #" + code);
+
+            // Send acceptance
+            JSONObject authOk = new JSONObject();
+            authOk.put("username", username);
+            authOk.put("code", code);
+            sendPacket(conn, "AUTH_OK", authOk);
+
+            // Push empty lists since brand new account
+            sendFriendsList(conn, code);
+
+        } catch (SQLException e) {
+            System.err.println("[REG] Critical SQL Error on setup: " + e.getMessage());
+            sendError(conn, "Внутренняя ошибка сервера при генерации кода");
+        }
+    }
+
+    private void handleAuth(WebSocket conn, JSONObject data) {
+        String username = data.optString("username", "").trim();
+        String password = data.optString("password", "").trim().toLowerCase();
+
+        if (username.isEmpty() || password.isEmpty()) {
+            sendError(conn, "Укажите имя пользователя и пароль");
+            return;
+        }
+
+        try (Connection db = getConnection(); PreparedStatement ps = db.prepareStatement("SELECT username, password, code FROM users WHERE LOWER(username) = ? LIMIT 1")) {
+            ps.setString(1, username.toLowerCase());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    sendError(conn, "Ошибка авторизации: Пользователь не существует");
+                    return;
+                }
+
+                String actualUser = rs.getString("username");
+                String actualPass = rs.getString("password").toLowerCase();
+                String code = rs.getString("code");
+
+                if (!actualPass.equals(password)) {
+                    sendError(conn, "Ошибка авторизации: Неверный логин или пароль");
+                    return;
+                }
+
+                // Update online status
+                try (PreparedStatement psUpd = db.prepareStatement("UPDATE users SET online = true WHERE code = ?")) {
+                    psUpd.setString(1, code);
+                    psUpd.executeUpdate();
+                }
+
+                // Thread Maps binding
+                activeConnections.put(code, conn);
+                socketUserCodes.put(conn, code);
+
+                System.out.println("[AUTH] Authenticated Java User: " + actualUser + " (#" + code + ")");
+
+                // Response Approved
+                JSONObject authOkObj = new JSONObject();
+                authOkObj.put("username", actualUser);
+                authOkObj.put("code", code);
+                sendPacket(conn, "AUTH_OK", authOkObj);
+
+                // Push Friends List
+                sendFriendsList(conn, code);
+
+                // Notify online friends of logging status
+                broadcastToFriends(code);
+            }
+        } catch (SQLException e) {
+            System.err.println("[AUTH] DB Query Connection Error: " + e.getMessage());
+            sendError(conn, "Ошибка сервера при авторизации");
+        }
+    }
+
+    private void handleAddFriend(WebSocket conn, JSONObject data) {
+        String currentCode = socketUserCodes.get(conn);
+        if (currentCode == null) {
+            sendError(conn, "Сессия больше не валидна, требуется войти снова.");
+            return;
+        }
+
+        String friendCode = data.optString("code", "").trim();
+        if (friendCode.isEmpty()) {
+            sendError(conn, "Введите корректный код потенциального собеседника.");
+            return;
+        }
+
+        if (friendCode.equals(currentCode)) {
+            sendError(conn, "Вы не можете добавить свой собственный код.");
+            return;
+        }
+
+        try (Connection db = getConnection()) {
+            // Find target username
+            try (PreparedStatement psTarget = db.prepareStatement("SELECT 1 FROM users WHERE code = ? LIMIT 1")) {
+                psTarget.setString(1, friendCode);
+                try (ResultSet rs = psTarget.executeQuery()) {
+                    if (!rs.next()) {
+                        sendError(conn, "Пользователь со специальным кодом #" + friendCode + " не найден в базе.");
+                        return;
+                    }
+                }
+            }
+
+            // Check if already friends
+            try (PreparedStatement psCheck = db.prepareStatement("SELECT 1 FROM friendships WHERE user_code = ? AND friend_code = ? LIMIT 1")) {
+                psCheck.setString(1, currentCode);
+                psCheck.setString(2, friendCode);
+                try (ResultSet rs = psCheck.executeQuery()) {
+                    if (rs.next()) {
+                        sendError(conn, "Пользователь уже находится в вашем списке чатов.");
+                        return;
+                    }
+                }
+            }
+
+            // Insert mutual connections
+            try (PreparedStatement psIns1 = db.prepareStatement("INSERT INTO friendships (user_code, friend_code) VALUES (?, ?)")) {
+                psIns1.setString(1, currentCode);
+                psIns1.setString(2, friendCode);
+                psIns1.executeUpdate();
+            }
+            try (PreparedStatement psIns2 = db.prepareStatement("INSERT INTO friendships (user_code, friend_code) VALUES (?, ?)")) {
+                psIns2.setString(1, friendCode);
+                psIns2.setString(2, currentCode);
+                psIns2.executeUpdate();
+            }
+
+            System.out.println("[Friendship] Mutually bound " + currentCode + " and " + friendCode);
+
+            // Update caller list
+            sendFriendsList(conn, currentCode);
+
+            // Update friend list instantly if online
+            WebSocket friendSocket = activeConnections.get(friendCode);
+            if (friendSocket != null && friendSocket.isOpen()) {
+                sendFriendsList(friendSocket, friendCode);
+            }
+
+        } catch (SQLException e) {
+            System.err.println("[Friendship Exception] " + e.getMessage());
+            sendError(conn, "Произошла ошибка при установлении контакта.");
+        }
+    }
+
+    private void handleGetHistory(WebSocket conn, JSONObject data) {
+        String currentCode = socketUserCodes.get(conn);
+        if (currentCode == null) {
+            sendError(conn, "Требуется авторизация");
+            return;
+        }
+
+        String room = data.optString("room", "");
+        if (room.isEmpty()) {
+            sendError(conn, "Комната не указана");
+            return;
+        }
+
+        System.out.println("[History] Java Socket Fetching log histories for room: " + room);
+
+        try (Connection db = getConnection()) {
+            JSONArray historyList = new JSONArray();
+
+            if (room.equals("GLOBAL")) {
+                try (PreparedStatement psHist = db.prepareStatement("SELECT sender, text, time FROM messages WHERE room = 'GLOBAL' ORDER BY timestamp ASC")) {
+                    try (ResultSet rs = psHist.executeQuery()) {
+                        while (rs.next()) {
+                            JSONObject msgObj = new JSONObject();
+                            msgObj.put("sender", rs.getString("sender"));
+                            msgObj.put("text", rs.getString("text"));
+                            msgObj.put("time", rs.getString("time"));
+                            historyList.put(msgObj);
+                        }
+                    }
+                }
+            } else {
+                try (PreparedStatement psHist = db.prepareStatement(
+                        "SELECT sender, text, time FROM messages " +
+                                "WHERE (room = ? AND sender_code = ?) " +
+                                "   OR (room = ? AND sender_code = ?) " +
+                                "ORDER BY timestamp ASC")) {
+                    psHist.setString(1, room);
+                    psHist.setString(2, currentCode);
+                    psHist.setString(3, currentCode);
+                    psHist.setString(4, room);
+
+                    try (ResultSet rs = psHist.executeQuery()) {
+                        while (rs.next()) {
+                            JSONObject msgObj = new JSONObject();
+                            msgObj.put("sender", rs.getString("sender"));
+                            msgObj.put("text", rs.getString("text"));
+                            msgObj.put("time", rs.getString("time"));
+                            historyList.put(msgObj);
+                        }
+                    }
+                }
+            }
+
+            JSONObject responseData = new JSONObject();
+            responseData.put("room", room);
+            responseData.put("history", historyList);
+            sendPacket(conn, "MSG_HISTORY", responseData);
+
+        } catch (SQLException e) {
+            System.err.println("[History Exception] " + e.getMessage());
+            sendError(conn, "Не удалось загрузить историю чата");
+        }
+    }
+
+    private void handleSendMessage(WebSocket conn, JSONObject data) {
+        String currentCode = socketUserCodes.get(conn);
+        if (currentCode == null) {
+            sendError(conn, "Ошибка отправки: Сессия не авторизована.");
+            return;
+        }
+
+        String to = data.optString("to", "");
+        String text = data.optString("text", "").trim();
+
+        if (to.isEmpty() || text.isEmpty()) {
+            return;
+        }
+
+        try (Connection db = getConnection()) {
+            // Find sender username and compute format
+            String senderUsername = "Пользователь";
+            try (PreparedStatement psUser = db.prepareStatement("SELECT username FROM users WHERE code = ? LIMIT 1")) {
+                psUser.setString(1, currentCode);
+                try (ResultSet rs = psUser.executeQuery()) {
+                    if (rs.next()) {
+                        senderUsername = rs.getString("username");
+                    }
+                }
+            }
+
+            long timestamp = System.currentTimeMillis();
+            SimpleDateFormat sdf = new SimpleDateFormat("HH:mm", new Locale("ru", "RU"));
+            String timeStr = sdf.format(new java.util.Date(timestamp));
+
+            // Write into database logs
+            try (PreparedStatement psIns = db.prepareStatement(
+                    "INSERT INTO messages (room, sender, sender_code, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)")) {
+                psIns.setString(1, to);
+                psIns.setString(2, senderUsername);
+                psIns.setString(3, currentCode);
+                psIns.setString(4, text);
+                psIns.setString(5, timeStr);
+                psIns.setLong(6, timestamp);
+                psIns.executeUpdate();
+            }
+
+            if (to.equals("GLOBAL")) {
+                // Circular Broadcast to ALL
+                JSONObject forwardObj = new JSONObject();
+                forwardObj.put("from", "GLOBAL");
+                forwardObj.put("senderName", senderUsername);
+                forwardObj.put("text", text);
+
+                for (WebSocket socketClient : getConnections()) {
+                    if (socketClient.isOpen()) {
+                        sendPacket(socketClient, "MSG", forwardObj);
+                    }
+                }
+            } else {
+                // Private message
+                JSONObject forwardPrivateFriend = new JSONObject();
+                forwardPrivateFriend.put("from", currentCode); // Sent from this sender code
+                forwardPrivateFriend.put("senderName", senderUsername);
+                forwardPrivateFriend.put("text", text);
+
+                WebSocket friendSocket = activeConnections.get(to);
+                if (friendSocket != null && friendSocket.isOpen()) {
+                    sendPacket(friendSocket, "MSG", forwardPrivateFriend);
+                }
+
+                // Send mirrored frame back to sender tab so UI appends it instantly
+                JSONObject forwardPrivateSender = new JSONObject();
+                forwardPrivateSender.put("from", to); // Under userCode of friend's active room
+                forwardPrivateSender.put("senderName", senderUsername);
+                forwardPrivateSender.put("text", text);
+                sendPacket(conn, "MSG", forwardPrivateSender);
+            }
+
+        } catch (SQLException e) {
+            System.err.println("[MSG Exception] " + e.getMessage());
+        }
+    }
+
+    private void sendError(WebSocket conn, String info) {
+        JSONObject obj = new JSONObject();
+        obj.put("message", info);
+        sendPacket(conn, "ERROR", obj);
+    }
+
+    private void sendPacket(WebSocket conn, String type, JSONObject data) {
+        if (conn == null || !conn.isOpen()) return;
+        JSONObject container = new JSONObject();
+        container.put("type", type);
+        container.put("data", data);
+        conn.send(container.toString() + "\n");
+    }
+
+    private void sendFriendsList(WebSocket conn, String userCode) {
+        try (Connection db = getConnection(); PreparedStatement ps = db.prepareStatement(
+                "SELECT u.username, u.code, u.online, u.avatar " +
+                        "FROM friendships f " +
+                        "JOIN users u ON f.friend_code = u.code " +
+                        "WHERE f.user_code = ?")) {
+            ps.setString(1, userCode);
+            try (ResultSet rs = ps.executeQuery()) {
+                JSONArray friendsArray = new JSONArray();
+                while (rs.next()) {
+                    JSONObject friend = new JSONObject();
+                    friend.put("username", rs.getString("username"));
+                    friend.put("code", rs.getString("code"));
+                    friend.put("online", rs.getBoolean("online"));
+                    friend.put("avatar", rs.getString("avatar") != null ? rs.getString("avatar") : "");
+                    friendsArray.put(friend);
+                }
+
+                JSONObject listPayload = new JSONObject();
+                listPayload.put("list", friendsArray);
+                sendPacket(conn, "FRIENDS_LIST", listPayload);
+            }
+        } catch (SQLException e) {
+            System.err.println("[Friendship Retrieval Failure] " + e.getMessage());
+        }
+    }
+
+    private void broadcastToFriends(String userCode) {
+        try (Connection db = getConnection(); PreparedStatement ps = db.prepareStatement("SELECT friend_code FROM friendships WHERE user_code = ?")) {
+            ps.setString(1, userCode);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String friendCode = rs.getString("friend_code");
+                    WebSocket friendSocket = activeConnections.get(friendCode);
+                    if (friendSocket != null && friendSocket.isOpen()) {
+                        sendFriendsList(friendSocket, friendCode);
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            System.err.println("[Broadcast Failure] " + e.getMessage());
+        }
+    }
+
+    private String generateUniqueCode(Connection db) throws SQLException {
+        Random rand = new Random();
+        for (int attempt = 0; attempt < 10000; attempt++) {
+            int num = rand.nextInt(10000);
+            String codeStr = String.format("%04d", num);
+
+            try (PreparedStatement psCheck = db.prepareStatement("SELECT 1 FROM users WHERE code = ? LIMIT 1")) {
+                psCheck.setString(1, codeStr);
+                try (ResultSet rs = psCheck.executeQuery()) {
+                    if (!rs.next()) {
+                        return codeStr;
+                    }
+                }
+            }
+        }
+        throw new SQLException("Unable to generate unique 4-digit code. Range exceeded.");
+    }
 }
