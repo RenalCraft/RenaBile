@@ -42,24 +42,12 @@ public class ServerMain extends WebSocketServer {
         }
 
         // Initialize Database URL
-        databaseUrl = System.getenv("DATABASE_URL");
-        if (databaseUrl == null || databaseUrl.isEmpty()) {
+        String rawDatabaseUrl = System.getenv("DATABASE_URL");
+        if (rawDatabaseUrl == null || rawDatabaseUrl.isEmpty()) {
             System.out.println("[WARNING] DATABASE_URL env variable is not set! SQL connections cannot establish.");
         } else {
-            // Adjust Render postgresql:// protocol prefix to standard jdbc:postgresql://
-            if (databaseUrl.startsWith("postgresql://")) {
-                databaseUrl = "jdbc:" + databaseUrl;
-            }
-            // Append SSL configuration if on cloud databases (Render, Elephantsql, Neon...)
-            if (databaseUrl.contains("render.com") || databaseUrl.contains("aws") || databaseUrl.contains("neon.tech")) {
-                if (!databaseUrl.contains("sslmode=")) {
-                    if (databaseUrl.contains("?")) {
-                        databaseUrl += "&sslmode=require";
-                    } else {
-                        databaseUrl += "?sslmode=require";
-                    }
-                }
-            }
+            databaseUrl = convertToJdbcUrl(rawDatabaseUrl);
+            System.out.println("[SERVER] Database URL converted to standard JDBC format.");
         }
 
         // Setup tables
@@ -69,6 +57,72 @@ public class ServerMain extends WebSocketServer {
         ServerMain server = new ServerMain(port);
         server.start();
         System.out.println("[ServerMain] Server successfully started on port: " + port);
+    }
+
+    public static String convertToJdbcUrl(String rawUrl) {
+        if (rawUrl == null || rawUrl.isEmpty()) {
+            return rawUrl;
+        }
+        if (!rawUrl.startsWith("postgresql://") && !rawUrl.startsWith("postgres://")) {
+            if (rawUrl.startsWith("jdbc:postgresql://")) {
+                return rawUrl;
+            }
+            return rawUrl;
+        }
+        try {
+            // Replace the protocol to parse via standard URI
+            String cleanUrl = rawUrl.replace("postgresql://", "http://").replace("postgres://", "http://");
+            URI uri = new URI(cleanUrl);
+            String userInfo = uri.getUserInfo();
+            String host = uri.getHost();
+            int port = uri.getPort();
+            String path = uri.getPath(); // starts with "/"
+
+            String username = "";
+            String password = "";
+            if (userInfo != null && userInfo.contains(":")) {
+                String[] parts = userInfo.split(":", 2);
+                username = parts[0];
+                password = parts[1];
+            } else if (userInfo != null) {
+                username = userInfo;
+            }
+
+            StringBuilder jdbcUrl = new StringBuilder("jdbc:postgresql://");
+            jdbcUrl.append(host);
+            if (port != -1) {
+                jdbcUrl.append(":").append(port);
+            } else {
+                jdbcUrl.append(":5432");
+            }
+            jdbcUrl.append(path);
+
+            List<String> params = new ArrayList<>();
+            if (!username.isEmpty()) {
+                params.add("user=" + username);
+            }
+            if (!password.isEmpty()) {
+                params.add("password=" + password);
+            }
+
+            // Always enforce sslmode=require for Render, AWS, Neon, Elephantsql
+            if (rawUrl.contains("render.com") || rawUrl.contains("aws") || rawUrl.contains("neon.tech") || rawUrl.contains("elephantsql")) {
+                params.add("sslmode=require");
+            }
+
+            if (!params.isEmpty()) {
+                jdbcUrl.append("?").append(String.join("&", params));
+            }
+
+            return jdbcUrl.toString();
+        } catch (Exception e) {
+            System.err.println("[Database URL Parser] Error converting URL: " + e.getMessage());
+            String fallback = rawUrl;
+            if (fallback.startsWith("postgresql://")) {
+                fallback = "jdbc:" + fallback;
+            }
+            return fallback;
+        }
     }
 
     private static synchronized Connection getConnection() throws SQLException {
@@ -94,6 +148,20 @@ public class ServerMain extends WebSocketServer {
                     ");");
             System.out.println("[DB] Users table verified.");
 
+            // Migration alter scripts (safe even if columns already exist)
+            try {
+                stmt.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password VARCHAR(255);");
+                stmt.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS code VARCHAR(4);");
+                stmt.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;");
+                stmt.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS online BOOLEAN DEFAULT FALSE;");
+                // Try making code unique if it isn't
+                try {
+                    stmt.execute("ALTER TABLE users ADD CONSTRAINT unique_code UNIQUE (code);");
+                } catch (SQLException ignored) {}
+            } catch (SQLException e) {
+                System.out.println("[DB Migration] Users alter info: " + e.getMessage());
+            }
+
             // Verify Friendships Table
             stmt.execute("CREATE TABLE IF NOT EXISTS friendships (" +
                     "user_code VARCHAR(4) NOT NULL, " +
@@ -113,6 +181,13 @@ public class ServerMain extends WebSocketServer {
                     "timestamp BIGINT NOT NULL" +
                     ");");
             System.out.println("[DB] Messages table verified.");
+
+            // Migration alter lines for message tables
+            try {
+                stmt.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_code VARCHAR(4);");
+            } catch (SQLException e) {
+                System.out.println("[DB Migration] Messages alter info: " + e.getMessage());
+            }
 
             // Mark everyone offline on startup
             stmt.execute("UPDATE users SET online = false;");
