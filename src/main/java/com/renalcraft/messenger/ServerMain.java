@@ -257,9 +257,34 @@ public class ServerMain extends WebSocketServer {
 
             // Migration alter lines for message tables
             try {
+                stmt.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS room VARCHAR(255);");
+            } catch (SQLException e) {
+                System.out.println("[DB Migration] Messages alter room info: " + e.getMessage());
+            }
+            try {
+                stmt.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender VARCHAR(255);");
+            } catch (SQLException e) {
+                System.out.println("[DB Migration] Messages alter sender info: " + e.getMessage());
+            }
+            try {
                 stmt.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_code VARCHAR(4);");
             } catch (SQLException e) {
-                System.out.println("[DB Migration] Messages alter info: " + e.getMessage());
+                System.out.println("[DB Migration] Messages alter sender_code info: " + e.getMessage());
+            }
+            try {
+                stmt.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS text TEXT;");
+            } catch (SQLException e) {
+                System.out.println("[DB Migration] Messages alter text info: " + e.getMessage());
+            }
+            try {
+                stmt.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS time VARCHAR(30);");
+            } catch (SQLException e) {
+                System.out.println("[DB Migration] Messages alter time info: " + e.getMessage());
+            }
+            try {
+                stmt.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS timestamp BIGINT;");
+            } catch (SQLException e) {
+                System.out.println("[DB Migration] Messages alter timestamp info: " + e.getMessage());
             }
 
             // Mark everyone offline on startup
