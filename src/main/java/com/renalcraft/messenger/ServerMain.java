@@ -611,6 +611,7 @@ public class ServerMain extends WebSocketServer {
 
         String to = data.optString("to", "");
         String text = data.optString("text", "").trim();
+        String clientMsgId = data.optString("clientMsgId", "");
 
         if (to.isEmpty() || text.isEmpty()) {
             return;
@@ -650,6 +651,7 @@ public class ServerMain extends WebSocketServer {
                 forwardObj.put("from", "GLOBAL");
                 forwardObj.put("senderName", senderUsername);
                 forwardObj.put("text", text);
+                forwardObj.put("clientMsgId", clientMsgId);
 
                 for (WebSocket socketClient : getConnections()) {
                     if (socketClient.isOpen()) {
@@ -662,6 +664,7 @@ public class ServerMain extends WebSocketServer {
                 forwardPrivateFriend.put("from", currentCode); // Sent from this sender code
                 forwardPrivateFriend.put("senderName", senderUsername);
                 forwardPrivateFriend.put("text", text);
+                forwardPrivateFriend.put("clientMsgId", clientMsgId);
 
                 WebSocket friendSocket = activeConnections.get(to);
                 if (friendSocket != null && friendSocket.isOpen()) {
@@ -673,6 +676,7 @@ public class ServerMain extends WebSocketServer {
                 forwardPrivateSender.put("from", to); // Under userCode of friend's active room
                 forwardPrivateSender.put("senderName", senderUsername);
                 forwardPrivateSender.put("text", text);
+                forwardPrivateSender.put("clientMsgId", clientMsgId);
                 sendPacket(conn, "MSG", forwardPrivateSender);
             }
 
