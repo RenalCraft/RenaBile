@@ -303,6 +303,15 @@ public class ServerMain extends WebSocketServer {
                 System.out.println("[DB Migration] Messages alter timestamp info: " + e.getMessage());
             }
 
+            try {
+                stmt.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS client_msg_id VARCHAR(255);");
+                stmt.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS reaction VARCHAR(255) DEFAULT '';");
+                stmt.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_edited BOOLEAN DEFAULT FALSE;");
+                stmt.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE;");
+            } catch (SQLException e) {
+                System.out.println("[DB Migration] Messages extra columns migration: " + e.getMessage());
+            }
+
             // Mark everyone offline on startup
             stmt.execute("UPDATE users SET online = false;");
             System.out.println("[DB] Marked all static user profiles offline.");
@@ -390,6 +399,12 @@ public class ServerMain extends WebSocketServer {
                 break;
             case "MSG":
                 handleSendMessage(conn, data);
+                break;
+            case "UPDATE_PROFILE":
+                handleUpdateProfile(conn, data);
+                break;
+            case "MSG_UPDATE":
+                handleMsgUpdate(conn, data);
                 break;
             default:
                 sendError(conn, "Неизвестный тип пакета: " + type);
@@ -719,22 +734,136 @@ public class ServerMain extends WebSocketServer {
         final String finalText = text;
         final String finalTimeStr = timeStr;
         final long finalTimestamp = timestamp;
+        final String finalClientMsgId = clientMsgId;
 
         dbExecutor.submit(() -> {
             try (Connection db = getConnection();
                  PreparedStatement psIns = db.prepareStatement(
-                         "INSERT INTO messages (room, sender, sender_code, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)")) {
+                         "INSERT INTO messages (room, sender, sender_code, text, time, timestamp, client_msg_id) VALUES (?, ?, ?, ?, ?, ?, ?)")) {
                 psIns.setString(1, finalTo);
                 psIns.setString(2, senderUsername);
                 psIns.setString(3, finalCurrentCode);
                 psIns.setString(4, finalText);
                 psIns.setString(5, finalTimeStr);
                 psIns.setLong(6, finalTimestamp);
+                psIns.setString(7, finalClientMsgId != null ? finalClientMsgId : "");
                 psIns.executeUpdate();
             } catch (SQLException e) {
                 System.err.println("[MSG Async DB Insert Exception] Failed to persist message: " + e.getMessage());
             }
         });
+    }
+
+    private void handleUpdateProfile(WebSocket conn, JSONObject data) {
+        String currentCode = socketUserCodes.get(conn);
+        if (currentCode == null) {
+            sendError(conn, "Ошибка обновления профиля: сессия не авторизована.");
+            return;
+        }
+
+        String username = data.optString("username");
+        String password = data.optString("password");
+        String avatar = data.optString("avatar");
+
+        if (username == null || username.trim().isEmpty()) {
+            sendError(conn, "Имя пользователя не может быть пустым");
+            return;
+        }
+
+        try (Connection db = getConnection()) {
+            if (password != null && !password.trim().isEmpty()) {
+                try (PreparedStatement ps = db.prepareStatement(
+                        "UPDATE users SET username = ?, password = ?, avatar = ? WHERE code = ?")) {
+                    ps.setString(1, username.trim());
+                    ps.setString(2, password.trim().toLowerCase());
+                    ps.setString(3, avatar != null ? avatar : "");
+                    ps.setString(4, currentCode);
+                    ps.executeUpdate();
+                }
+            } else {
+                try (PreparedStatement ps = db.prepareStatement(
+                        "UPDATE users SET username = ?, avatar = ? WHERE code = ?")) {
+                    ps.setString(1, username.trim());
+                    ps.setString(2, avatar != null ? avatar : "");
+                    ps.setString(3, currentCode);
+                    ps.executeUpdate();
+                }
+            }
+
+            System.out.println("[Profile Update] Updated code " + currentCode + " to username=" + username);
+
+            JSONObject okObj = new JSONObject();
+            okObj.put("username", username.trim());
+            okObj.put("code", currentCode);
+            sendPacket(conn, "AUTH_OK", okObj);
+
+            // Notify friends and self
+            sendFriendsList(conn, currentCode);
+            broadcastToFriends(currentCode);
+
+        } catch (SQLException e) {
+            System.err.println("[Profile Update Exception] " + e.getMessage());
+            sendError(conn, "Ошибка базы данных при обновлении профиля: " + e.getMessage());
+        }
+    }
+
+    private void handleMsgUpdate(WebSocket conn, JSONObject data) {
+        String currentCode = socketUserCodes.get(conn);
+        if (currentCode == null) {
+            sendError(conn, "Ошибка обновления сообщения: сессия не авторизована.");
+            return;
+        }
+
+        String clientMsgId = data.optString("clientMsgId");
+        String room = data.optString("room");
+        String text = data.optString("text");
+        String reaction = data.optString("reaction");
+        boolean isEdited = data.optBoolean("isEdited", false);
+        boolean isDeleted = data.optBoolean("isDeleted", false);
+
+        if (clientMsgId == null || clientMsgId.isEmpty()) {
+            return;
+        }
+
+        // Direct async update to database first
+        dbExecutor.submit(() -> {
+            try (Connection db = getConnection();
+                 PreparedStatement ps = db.prepareStatement(
+                         "UPDATE messages SET text = ?, reaction = ?, is_edited = ?, is_deleted = ? WHERE client_msg_id = ?")) {
+                ps.setString(1, text);
+                ps.setString(2, reaction);
+                ps.setBoolean(3, isEdited);
+                ps.setBoolean(4, isDeleted);
+                ps.setString(5, clientMsgId);
+                ps.executeUpdate();
+            } catch (SQLException e) {
+                System.err.println("[MSG Update DB error] " + e.getMessage());
+            }
+        });
+
+        // Broadcast to clients in the room
+        JSONObject fwd = new JSONObject();
+        fwd.put("clientMsgId", clientMsgId);
+        fwd.put("room", room);
+        fwd.put("text", text);
+        fwd.put("reaction", reaction);
+        fwd.put("isEdited", isEdited);
+        fwd.put("isDeleted", isDeleted);
+
+        if (room.equals("GLOBAL")) {
+            for (WebSocket socketClient : getConnections()) {
+                if (socketClient.isOpen()) {
+                    sendPacket(socketClient, "MSG_UPDATE", fwd);
+                }
+            }
+        } else {
+            // Target recipient and self
+            WebSocket friendSocket = activeConnections.get(room);
+            if (friendSocket != null && friendSocket.isOpen()) {
+                sendPacket(friendSocket, "MSG_UPDATE", fwd);
+            }
+            sendPacket(conn, "MSG_UPDATE", fwd);
+        }
     }
 
     private void sendError(WebSocket conn, String info) {
