@@ -25,6 +25,9 @@ public class ServerMain extends WebSocketServer {
     // Reverse map: WebSocket -> authenticated userCode (to manage offlines faster)
     private final Map<WebSocket, String> socketUserCodes = new ConcurrentHashMap<>();
 
+    // Background thread pool to decouple DB writes from high-frequency WebSocket notifications
+    private final java.util.concurrent.ExecutorService dbExecutor = java.util.concurrent.Executors.newCachedThreadPool();
+
     public ServerMain(int port) {
         super(new InetSocketAddress(port));
     }
@@ -283,6 +286,19 @@ public class ServerMain extends WebSocketServer {
             }
             try {
                 stmt.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS timestamp BIGINT;");
+                // Check if the current timestamp column type in Postgres is NOT bigint (e.g. if it is old TIMESTAMP) and fix it
+                try (ResultSet rsType = stmt.executeQuery(
+                        "SELECT data_type FROM information_schema.columns " +
+                        "WHERE table_name = 'messages' AND column_name = 'timestamp';")) {
+                    if (rsType.next()) {
+                        String dataType = rsType.getString("data_type");
+                        if (dataType != null && !dataType.toLowerCase().contains("bigint") && !dataType.toLowerCase().contains("numeric")) {
+                            System.out.println("[DB Migration] Messages timestamp column has wrong type: " + dataType + ". Recreating as BIGINT...");
+                            stmt.execute("ALTER TABLE messages DROP COLUMN timestamp CASCADE;");
+                            stmt.execute("ALTER TABLE messages ADD COLUMN timestamp BIGINT DEFAULT 0;");
+                        }
+                    }
+                }
             } catch (SQLException e) {
                 System.out.println("[DB Migration] Messages alter timestamp info: " + e.getMessage());
             }
@@ -642,72 +658,83 @@ public class ServerMain extends WebSocketServer {
             return;
         }
 
-        try (Connection db = getConnection()) {
-            // Find sender username and compute format
-            String senderUsername = "Пользователь";
-            try (PreparedStatement psUser = db.prepareStatement("SELECT username FROM users WHERE code = ? LIMIT 1")) {
-                psUser.setString(1, currentCode);
-                try (ResultSet rs = psUser.executeQuery()) {
-                    if (rs.next()) {
-                        senderUsername = rs.getString("username");
-                    }
+        // 1. Resolve sender's name instantly from connection information or DB
+        String resolvedSenderUsername = "Пользователь";
+        try (Connection db = getConnection();
+             PreparedStatement psUser = db.prepareStatement("SELECT username FROM users WHERE code = ? LIMIT 1")) {
+            psUser.setString(1, currentCode);
+            try (ResultSet rs = psUser.executeQuery()) {
+                if (rs.next()) {
+                    resolvedSenderUsername = rs.getString("username");
                 }
             }
-
-            long timestamp = System.currentTimeMillis();
-            SimpleDateFormat sdf = new SimpleDateFormat("HH:mm", new Locale("ru", "RU"));
-            String timeStr = sdf.format(new java.util.Date(timestamp));
-
-            // Write into database logs
-            try (PreparedStatement psIns = db.prepareStatement(
-                    "INSERT INTO messages (room, sender, sender_code, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)")) {
-                psIns.setString(1, to);
-                psIns.setString(2, senderUsername);
-                psIns.setString(3, currentCode);
-                psIns.setString(4, text);
-                psIns.setString(5, timeStr);
-                psIns.setLong(6, timestamp);
-                psIns.executeUpdate();
-            }
-
-            if (to.equals("GLOBAL")) {
-                // Circular Broadcast to ALL
-                JSONObject forwardObj = new JSONObject();
-                forwardObj.put("from", "GLOBAL");
-                forwardObj.put("senderName", senderUsername);
-                forwardObj.put("text", text);
-                forwardObj.put("clientMsgId", clientMsgId);
-
-                for (WebSocket socketClient : getConnections()) {
-                    if (socketClient.isOpen()) {
-                        sendPacket(socketClient, "MSG", forwardObj);
-                    }
-                }
-            } else {
-                // Private message
-                JSONObject forwardPrivateFriend = new JSONObject();
-                forwardPrivateFriend.put("from", currentCode); // Sent from this sender code
-                forwardPrivateFriend.put("senderName", senderUsername);
-                forwardPrivateFriend.put("text", text);
-                forwardPrivateFriend.put("clientMsgId", clientMsgId);
-
-                WebSocket friendSocket = activeConnections.get(to);
-                if (friendSocket != null && friendSocket.isOpen()) {
-                    sendPacket(friendSocket, "MSG", forwardPrivateFriend);
-                }
-
-                // Send mirrored frame back to sender tab so UI appends it instantly
-                JSONObject forwardPrivateSender = new JSONObject();
-                forwardPrivateSender.put("from", to); // Under userCode of friend's active room
-                forwardPrivateSender.put("senderName", senderUsername);
-                forwardPrivateSender.put("text", text);
-                forwardPrivateSender.put("clientMsgId", clientMsgId);
-                sendPacket(conn, "MSG", forwardPrivateSender);
-            }
-
         } catch (SQLException e) {
-            System.err.println("[MSG Exception] " + e.getMessage());
+            System.err.println("[MSG Sender Resolve warning] " + e.getMessage());
         }
+
+        final String senderUsername = resolvedSenderUsername;
+        long timestamp = System.currentTimeMillis();
+        SimpleDateFormat sdf = new SimpleDateFormat("HH:mm", new Locale("ru", "RU"));
+        String timeStr = sdf.format(new java.util.Date(timestamp));
+
+        // 2. BROADCAST INSTANTLY (sub-millisecond latency on WebSockets)
+        if (to.equals("GLOBAL")) {
+            // Circular Broadcast to ALL
+            JSONObject forwardObj = new JSONObject();
+            forwardObj.put("from", "GLOBAL");
+            forwardObj.put("senderName", senderUsername);
+            forwardObj.put("text", text);
+            forwardObj.put("clientMsgId", clientMsgId);
+
+            for (WebSocket socketClient : getConnections()) {
+                if (socketClient.isOpen()) {
+                    sendPacket(socketClient, "MSG", forwardObj);
+                }
+            }
+        } else {
+            // Private message
+            JSONObject forwardPrivateFriend = new JSONObject();
+            forwardPrivateFriend.put("from", currentCode); // Sent from this sender code
+            forwardPrivateFriend.put("senderName", senderUsername);
+            forwardPrivateFriend.put("text", text);
+            forwardPrivateFriend.put("clientMsgId", clientMsgId);
+
+            WebSocket friendSocket = activeConnections.get(to);
+            if (friendSocket != null && friendSocket.isOpen()) {
+                sendPacket(friendSocket, "MSG", forwardPrivateFriend);
+            }
+
+            // Send mirrored frame back to sender tab so UI appends it instantly
+            JSONObject forwardPrivateSender = new JSONObject();
+            forwardPrivateSender.put("from", to); // Under userCode of friend's active room
+            forwardPrivateSender.put("senderName", senderUsername);
+            forwardPrivateSender.put("text", text);
+            forwardPrivateSender.put("clientMsgId", clientMsgId);
+            sendPacket(conn, "MSG", forwardPrivateSender);
+        }
+
+        // 3. PERSIST TO POSTGRES ASYNC (Decoupled from actual message delivery/broadcasts)
+        final String finalTo = to;
+        final String finalCurrentCode = currentCode;
+        final String finalText = text;
+        final String finalTimeStr = timeStr;
+        final long finalTimestamp = timestamp;
+
+        dbExecutor.submit(() -> {
+            try (Connection db = getConnection();
+                 PreparedStatement psIns = db.prepareStatement(
+                         "INSERT INTO messages (room, sender, sender_code, text, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)")) {
+                psIns.setString(1, finalTo);
+                psIns.setString(2, senderUsername);
+                psIns.setString(3, finalCurrentCode);
+                psIns.setString(4, finalText);
+                psIns.setString(5, finalTimeStr);
+                psIns.setLong(6, finalTimestamp);
+                psIns.executeUpdate();
+            } catch (SQLException e) {
+                System.err.println("[MSG Async DB Insert Exception] Failed to persist message: " + e.getMessage());
+            }
+        });
     }
 
     private void sendError(WebSocket conn, String info) {
