@@ -207,6 +207,11 @@ public class ServerMain extends WebSocketServer {
 
             // Migration alter scripts (safe even if columns already exist)
             try {
+                stmt.execute("ALTER TABLE users DROP COLUMN IF EXISTS user_code CASCADE;");
+            } catch (SQLException e) {
+                System.out.println("[DB Migration] Users drop user_code info: " + e.getMessage());
+            }
+            try {
                 stmt.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password VARCHAR(255);");
             } catch (SQLException e) {
                 System.out.println("[DB Migration] Users alter password info: " + e.getMessage());
