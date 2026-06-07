@@ -476,7 +476,7 @@ public class ServerMain extends WebSocketServer {
             return;
         }
 
-        try (Connection db = getConnection(); PreparedStatement ps = db.prepareStatement("SELECT username, password, code FROM users WHERE LOWER(username) = ? LIMIT 1")) {
+        try (Connection db = getConnection(); PreparedStatement ps = db.prepareStatement("SELECT username, password, code, avatar FROM users WHERE LOWER(username) = ? LIMIT 1")) {
             ps.setString(1, username.toLowerCase());
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) {
@@ -487,6 +487,8 @@ public class ServerMain extends WebSocketServer {
                 String actualUser = rs.getString("username");
                 String actualPass = rs.getString("password").toLowerCase();
                 String code = rs.getString("code");
+                String avatarVal = rs.getString("avatar");
+                if (avatarVal == null) avatarVal = "";
 
                 if (!actualPass.equals(password)) {
                     sendError(conn, "Ошибка авторизации: Неверный логин или пароль");
@@ -509,6 +511,7 @@ public class ServerMain extends WebSocketServer {
                 JSONObject authOkObj = new JSONObject();
                 authOkObj.put("username", actualUser);
                 authOkObj.put("code", code);
+                authOkObj.put("avatar", avatarVal);
                 sendPacket(conn, "AUTH_OK", authOkObj);
 
                 // Push Friends List
@@ -795,6 +798,7 @@ public class ServerMain extends WebSocketServer {
             JSONObject okObj = new JSONObject();
             okObj.put("username", username.trim());
             okObj.put("code", currentCode);
+            okObj.put("avatar", avatar != null ? avatar : "");
             sendPacket(conn, "AUTH_OK", okObj);
 
             // Notify friends and self
