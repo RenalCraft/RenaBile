@@ -1,4 +1,4 @@
-package com.renalcraft.messenger;
+package com.renalcraft.messenger.server;
 
 import org.java_websocket.WebSocket;
 import org.java_websocket.handshake.ClientHandshake;
@@ -7,6 +7,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.sql.*;
 import java.text.SimpleDateFormat;
 import java.util.*;
@@ -66,7 +68,7 @@ public class ServerMain extends WebSocketServer {
         // Start server
         ServerMain server = new ServerMain(port);
         server.start();
-        System.out.println("[RenaBile Java Server] Server successfully started on port: " + port);
+        System.out.println("[ServerMain] Server successfully started on port: " + port);
     }
 
     private static synchronized Connection getConnection() throws SQLException {
