@@ -63,63 +63,118 @@ public class ServerMain extends WebSocketServer {
         if (rawUrl == null || rawUrl.isEmpty()) {
             return rawUrl;
         }
-        if (!rawUrl.startsWith("postgresql://") && !rawUrl.startsWith("postgres://")) {
-            if (rawUrl.startsWith("jdbc:postgresql://")) {
-                return rawUrl;
-            }
+        if (rawUrl.startsWith("jdbc:postgresql://")) {
             return rawUrl;
         }
+        if (!rawUrl.startsWith("postgresql://") && !rawUrl.startsWith("postgres://")) {
+            return rawUrl;
+        }
+
         try {
-            // Replace the protocol to parse via standard URI
-            String cleanUrl = rawUrl.replace("postgresql://", "http://").replace("postgres://", "http://");
-            URI uri = new URI(cleanUrl);
-            String userInfo = uri.getUserInfo();
-            String host = uri.getHost();
-            int port = uri.getPort();
-            String path = uri.getPath(); // starts with "/"
+            // Strip scheme
+            String withoutScheme = rawUrl.substring(rawUrl.indexOf("://") + 3);
+
+            // Separate path and query from authority
+            String authorityAndPath;
+            String query = "";
+            int dummyQuestionMark = withoutScheme.indexOf('?');
+            if (dummyQuestionMark != -1) {
+                authorityAndPath = withoutScheme.substring(0, dummyQuestionMark);
+                query = withoutScheme.substring(dummyQuestionMark + 1);
+            } else {
+                authorityAndPath = withoutScheme;
+            }
+
+            int firstSlash = authorityAndPath.indexOf('/');
+            String authority;
+            String dbName = "";
+            if (firstSlash != -1) {
+                authority = authorityAndPath.substring(0, firstSlash);
+                dbName = authorityAndPath.substring(firstSlash + 1);
+            } else {
+                authority = authorityAndPath;
+            }
+
+            // Parse user info and host
+            String userInfo = "";
+            String hostAndPort = authority;
+            int atIndex = authority.lastIndexOf('@');
+            if (atIndex != -1) {
+                userInfo = authority.substring(0, atIndex);
+                hostAndPort = authority.substring(atIndex + 1);
+            }
 
             String username = "";
             String password = "";
-            if (userInfo != null && userInfo.contains(":")) {
-                String[] parts = userInfo.split(":", 2);
-                username = parts[0];
-                password = parts[1];
-            } else if (userInfo != null) {
-                username = userInfo;
+            if (!userInfo.isEmpty()) {
+                int colonIndex = userInfo.indexOf(':');
+                if (colonIndex != -1) {
+                    username = userInfo.substring(0, colonIndex);
+                    password = userInfo.substring(colonIndex + 1);
+                } else {
+                    username = userInfo;
+                }
             }
 
+            // Parse host and port
+            String host = hostAndPort;
+            String port = "5432";
+            int colonHostPort = hostAndPort.lastIndexOf(':');
+            if (colonHostPort != -1 && colonHostPort > hostAndPort.lastIndexOf(']')) {
+                host = hostAndPort.substring(0, colonHostPort);
+                port = hostAndPort.substring(colonHostPort + 1);
+            }
+
+            // Construct JDBC URL: jdbc:postgresql://host:port/dbName
             StringBuilder jdbcUrl = new StringBuilder("jdbc:postgresql://");
-            jdbcUrl.append(host);
-            if (port != -1) {
-                jdbcUrl.append(":").append(port);
-            } else {
-                jdbcUrl.append(":5432");
-            }
-            jdbcUrl.append(path);
+            jdbcUrl.append(host).append(":").append(port).append("/").append(dbName);
 
-            List<String> params = new ArrayList<>();
+            // Build parameters
+            Map<String, String> params = new LinkedHashMap<>();
             if (!username.isEmpty()) {
-                params.add("user=" + username);
+                params.put("user", username);
             }
             if (!password.isEmpty()) {
-                params.add("password=" + password);
+                params.put("password", password);
             }
 
-            // Always enforce sslmode=require for Render, AWS, Neon, Elephantsql
+            // Default SSL for cloud/render
             if (rawUrl.contains("render.com") || rawUrl.contains("aws") || rawUrl.contains("neon.tech") || rawUrl.contains("elephantsql")) {
-                params.add("sslmode=require");
+                params.put("sslmode", "require");
             }
 
+            // If there's original query parameters, parse them too, avoiding duplicates
+            if (!query.isEmpty()) {
+                String[] queryParts = query.split("&");
+                for (String part : queryParts) {
+                    String[] kv = part.split("=", 2);
+                    if (kv.length == 2) {
+                        params.put(kv[0], kv[1]);
+                    } else if (kv.length == 1) {
+                        params.put(kv[0], "");
+                    }
+                }
+            }
+
+            // Append credentials and options
             if (!params.isEmpty()) {
-                jdbcUrl.append("?").append(String.join("&", params));
+                jdbcUrl.append("?");
+                List<String> paramList = new ArrayList<>();
+                for (Map.Entry<String, String> entry : params.entrySet()) {
+                    paramList.add(entry.getKey() + "=" + entry.getValue());
+                }
+                jdbcUrl.append(String.join("&", paramList));
             }
 
             return jdbcUrl.toString();
         } catch (Exception e) {
-            System.err.println("[Database URL Parser] Error converting URL: " + e.getMessage());
+            System.err.println("[Database URL Parser] Manual parsing error: " + e.getMessage());
+            // Safe fallback
             String fallback = rawUrl;
             if (fallback.startsWith("postgresql://")) {
                 fallback = "jdbc:" + fallback;
+            } else if (fallback.startsWith("postgres://")) {
+                fallback = "jdbc:postgresql://" + fallback.substring(11);
             }
             return fallback;
         }
