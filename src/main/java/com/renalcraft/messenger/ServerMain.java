@@ -616,20 +616,24 @@ public class ServerMain extends WebSocketServer {
             JSONArray historyList = new JSONArray();
 
             if (room.equals("GLOBAL")) {
-                try (PreparedStatement psHist = db.prepareStatement("SELECT sender, text, time FROM messages WHERE room = 'GLOBAL' ORDER BY timestamp ASC")) {
+                try (PreparedStatement psHist = db.prepareStatement("SELECT sender, text, time, client_msg_id, reaction, is_edited, is_deleted FROM messages WHERE room = 'GLOBAL' ORDER BY timestamp ASC")) {
                     try (ResultSet rs = psHist.executeQuery()) {
                         while (rs.next()) {
                             JSONObject msgObj = new JSONObject();
                             msgObj.put("sender", rs.getString("sender"));
                             msgObj.put("text", rs.getString("text"));
                             msgObj.put("time", rs.getString("time"));
+                            msgObj.put("client_msg_id", rs.getString("client_msg_id") != null ? rs.getString("client_msg_id") : "");
+                            msgObj.put("reaction", rs.getString("reaction") != null ? rs.getString("reaction") : "");
+                            msgObj.put("is_edited", rs.getBoolean("is_edited"));
+                            msgObj.put("is_deleted", rs.getBoolean("is_deleted"));
                             historyList.put(msgObj);
                         }
                     }
                 }
             } else {
                 try (PreparedStatement psHist = db.prepareStatement(
-                        "SELECT sender, text, time FROM messages " +
+                        "SELECT sender, text, time, client_msg_id, reaction, is_edited, is_deleted FROM messages " +
                                 "WHERE (room = ? AND sender_code = ?) " +
                                 "   OR (room = ? AND sender_code = ?) " +
                                 "ORDER BY timestamp ASC")) {
@@ -644,6 +648,10 @@ public class ServerMain extends WebSocketServer {
                             msgObj.put("sender", rs.getString("sender"));
                             msgObj.put("text", rs.getString("text"));
                             msgObj.put("time", rs.getString("time"));
+                            msgObj.put("client_msg_id", rs.getString("client_msg_id") != null ? rs.getString("client_msg_id") : "");
+                            msgObj.put("reaction", rs.getString("reaction") != null ? rs.getString("reaction") : "");
+                            msgObj.put("is_edited", rs.getBoolean("is_edited"));
+                            msgObj.put("is_deleted", rs.getBoolean("is_deleted"));
                             historyList.put(msgObj);
                         }
                     }
