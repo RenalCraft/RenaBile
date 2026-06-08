@@ -235,6 +235,11 @@ public class ServerMain extends WebSocketServer {
                 System.out.println("[DB Migration] Users alter online info: " + e.getMessage());
             }
             try {
+                stmt.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen BIGINT DEFAULT 0;");
+            } catch (SQLException e) {
+                System.out.println("[DB Migration] Users alter last_seen info: " + e.getMessage());
+            }
+            try {
                 stmt.execute("ALTER TABLE users ADD CONSTRAINT unique_code UNIQUE (code);");
             } catch (SQLException ignored) {}
 
@@ -332,10 +337,11 @@ public class ServerMain extends WebSocketServer {
         String userCode = socketUserCodes.remove(conn);
         if (userCode != null) {
             activeConnections.remove(userCode);
-            try (Connection db = getConnection(); PreparedStatement ps = db.prepareStatement("UPDATE users SET online = false WHERE code = ?")) {
-                ps.setString(1, userCode);
+            try (Connection db = getConnection(); PreparedStatement ps = db.prepareStatement("UPDATE users SET online = false, last_seen = ? WHERE code = ?")) {
+                ps.setLong(1, System.currentTimeMillis());
+                ps.setString(2, userCode);
                 ps.executeUpdate();
-                System.out.println("[Status] User offline: #" + userCode);
+                System.out.println("[Status] User offline with last_seen logged: #" + userCode);
 
                 // Alert teammates of status change
                 broadcastToFriends(userCode);
@@ -405,6 +411,9 @@ public class ServerMain extends WebSocketServer {
                 break;
             case "MSG_UPDATE":
                 handleMsgUpdate(conn, data);
+                break;
+            case "CLEAR_HISTORY":
+                handleClearHistory(conn, data);
                 break;
             default:
                 sendError(conn, "Неизвестный тип пакета: " + type);
@@ -669,6 +678,60 @@ public class ServerMain extends WebSocketServer {
         }
     }
 
+    private void handleClearHistory(WebSocket conn, JSONObject data) {
+        String currentCode = socketUserCodes.get(conn);
+        if (currentCode == null) {
+            sendError(conn, "Требуется авторизация");
+            return;
+        }
+
+        String room = data.optString("room", "");
+        if (room.isEmpty()) {
+            sendError(conn, "Комната не указана");
+            return;
+        }
+
+        System.out.println("[Clear] Java Socket Clearing history for room: " + room + " requested by #" + currentCode);
+
+        try (Connection db = getConnection()) {
+            if (room.equals("GLOBAL")) {
+                try (PreparedStatement psClear = db.prepareStatement("DELETE FROM messages WHERE room = 'GLOBAL'")) {
+                    psClear.executeUpdate();
+                }
+            } else {
+                try (PreparedStatement psClear = db.prepareStatement(
+                        "DELETE FROM messages " +
+                                "WHERE (room = ? AND sender_code = ?) " +
+                                "   OR (room = ? AND sender_code = ?)")) {
+                    psClear.setString(1, room);
+                    psClear.setString(2, currentCode);
+                    psClear.setString(3, currentCode);
+                    psClear.setString(4, room);
+                    psClear.executeUpdate();
+                }
+            }
+
+            // Broadcast back MSG_HISTORY empty list
+            JSONObject emptyPayload = new JSONObject();
+            emptyPayload.put("room", room);
+            emptyPayload.put("history", new JSONArray());
+            sendPacket(conn, "MSG_HISTORY", emptyPayload);
+
+            WebSocket otherConn = activeConnections.get(room);
+            if (otherConn != null && otherConn.isOpen()) {
+                JSONObject otherPayload = new JSONObject();
+                otherPayload.put("room", currentCode);
+                otherPayload.put("history", new JSONArray());
+                sendPacket(otherConn, "MSG_HISTORY", otherPayload);
+            }
+
+            System.out.println("[Clear] Java Socket Clearing successful");
+        } catch (SQLException e) {
+            System.err.println("[Clear Failure Java] " + e.getMessage());
+            sendError(conn, "Не удалось очистить историю");
+        }
+    }
+
     private void handleSendMessage(WebSocket conn, JSONObject data) {
         String currentCode = socketUserCodes.get(conn);
         if (currentCode == null) {
@@ -894,7 +957,7 @@ public class ServerMain extends WebSocketServer {
 
     private void sendFriendsList(WebSocket conn, String userCode) {
         try (Connection db = getConnection(); PreparedStatement ps = db.prepareStatement(
-                "SELECT u.username, u.code, u.online, u.avatar " +
+                "SELECT u.username, u.code, u.online, u.avatar, u.last_seen " +
                         "FROM friendships f " +
                         "JOIN users u ON f.friend_code = u.code " +
                         "WHERE f.user_code = ?")) {
@@ -907,6 +970,7 @@ public class ServerMain extends WebSocketServer {
                     friend.put("code", rs.getString("code"));
                     friend.put("online", rs.getBoolean("online"));
                     friend.put("avatar", rs.getString("avatar") != null ? rs.getString("avatar") : "");
+                    friend.put("last_seen", rs.getLong("last_seen"));
                     friendsArray.put(friend);
                 }
 
